@@ -1,8 +1,6 @@
-import { join } from "node:path";
 import type { ResolvedReference } from "./types";
-
-const REFERENCE_TOKEN_RE = /@([^/\s`,]+)(\/[^\s`]*)?/g;
-const TRAILING_PUNCTUATION_RE = /[.,;:!?)]*$/;
+import { resolveInsideRoot } from "./resolve";
+import { findReferenceTokens } from "./tokenize";
 
 function resolveTokenPath(reference: ResolvedReference, rawPath: string | undefined): string | undefined {
   if (!reference.resolvedPath) {
@@ -13,27 +11,32 @@ function resolveTokenPath(reference: ResolvedReference, rawPath: string | undefi
     return reference.resolvedPath;
   }
 
-  return join(reference.resolvedPath, rawPath.replace(/^\//, ""));
+  return resolveInsideRoot(reference.resolvedPath, rawPath.replace(/^\//, ""));
+}
+
+export function getReferencedAliases(text: string): string[] {
+  return Array.from(new Set(findReferenceTokens(text).map((token) => token.alias)));
 }
 
 export function expandReferencesInText(text: string, references: ResolvedReference[]): string {
   const byAlias = new Map(references.map((reference) => [reference.alias, reference]));
+  const tokens = findReferenceTokens(text);
 
-  return text.replace(REFERENCE_TOKEN_RE, (fullMatch, alias: string, rawPath?: string) => {
-    const trailing = fullMatch.match(TRAILING_PUNCTUATION_RE)?.[0] ?? "";
-    const token = trailing ? fullMatch.slice(0, -trailing.length) : fullMatch;
-    const cleanAlias = trailing && !rawPath ? alias.slice(0, -trailing.length) : alias;
-    const cleanRawPath = rawPath && trailing ? rawPath.slice(0, -trailing.length) : rawPath;
-    const reference = byAlias.get(cleanAlias);
+  let result = text;
+  for (const token of tokens.reverse()) {
+    const reference = byAlias.get(token.alias);
     if (!reference) {
-      return fullMatch;
+      continue;
     }
 
-    const resolved = resolveTokenPath(reference, cleanRawPath);
+    const resolved = resolveTokenPath(reference, token.rawPath);
     if (!resolved) {
-      return fullMatch;
+      continue;
     }
 
-    return `${token} [resolved: ${resolved}]${trailing}`;
-  });
+    const replacement = `${token.token} [resolved: ${resolved}]${token.trailing}`;
+    result = `${result.slice(0, token.start)}${replacement}${result.slice(token.end)}`;
+  }
+
+  return result;
 }

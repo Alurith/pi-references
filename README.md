@@ -119,7 +119,7 @@ To make Pi load the extension, use `pi install ...`, or load it explicitly with 
 
 ## Configuration
 
-`pi-references` reads configuration from both global and project locations.
+`pi-references` reads configuration from both global and project locations. Project-local configuration is loaded only when Pi trusts the current project.
 
 ### Project config
 
@@ -141,7 +141,7 @@ Relative paths in global config are resolved from `~/.pi/agent`.
 
 ### Merge behavior
 
-Both global and project references are loaded.
+Global references are always loaded. Project references are loaded only for trusted projects.
 
 If the same alias exists in both places, the project reference overrides the global one.
 
@@ -187,7 +187,7 @@ Git repositories are cloned into:
 ~/.pi/agent/cache/references/
 ```
 
-Existing cached checkouts are reused. The extension does not perform aggressive automatic updates.
+Existing cached checkouts are reused. Git repositories are cloned lazily the first time you browse or use that reference. The extension does not perform aggressive automatic updates.
 
 ### Shorthand syntax
 
@@ -202,7 +202,7 @@ Like OpenCode, string shorthand is supported:
 }
 ```
 
-String values that look like Git references are treated as `repository`; other strings are treated as local `path`.
+String values that point to an existing local path are treated as `path`. Otherwise, values that look like Git references are treated as `repository`; other strings are treated as local `path`.
 
 ### Hidden references
 
@@ -238,7 +238,7 @@ Compare the current implementation with @sdk/src/client.ts
 Use @docs to check the product behavior before changing this flow
 ```
 
-When a reference is used, the extension expands it with its resolved filesystem path before the model receives the prompt:
+When a reference is used, the extension expands it with its resolved filesystem path before the model receives the prompt. Git references are cloned at this point if needed:
 
 ```text
 @sdk/src/client.ts [resolved: /home/user/.pi/agent/cache/references/sdk-abc123/src/client.ts]
@@ -277,18 +277,24 @@ Implemented:
 - local references
 - Git references
 - global + project config
+- project config loaded only when Pi trusts the project
 - JSON + JSONC comments/trailing commas
 - `description`
 - `hidden`
-- alias autocomplete
-- file autocomplete inside references
+- additive alias autocomplete that keeps Pi's native `@` file completion
+- file autocomplete inside references with path escape protection
+- lazy Git clone on first browse/use
+- atomic Git clone into cache
 - input expansion to `[resolved: /real/path]`
+- shared tokenizer for autocomplete and input expansion
 
 Not implemented yet:
 
 - explicit manual sync command
 - aggressive automatic Git updates
 - persistent file index/cache
+- recursive parent-directory config discovery
+- symlink boundary hardening
 - permission boundary changes
 
 ## Development

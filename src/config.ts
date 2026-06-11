@@ -20,12 +20,20 @@ type ConfigPath = {
   referenceBaseDir: string;
 };
 
-function looksLikeGitReference(value: string): boolean {
+export type LoadReferencesOptions = {
+  includeProject?: boolean;
+};
+
+function isExplicitGitReference(value: string): boolean {
   return (
     /^git@/i.test(value) ||
-    /^(https?:\/\/|ssh:\/\/)/i.test(value) ||
-    /^[^./~\s][^\s]*\/[^\s]+$/.test(value)
+    /^(https?:\/\/|ssh:\/\/|git:\/\/)/i.test(value) ||
+    /^github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?$/i.test(value)
   );
+}
+
+function looksLikeGitReference(value: string): boolean {
+  return isExplicitGitReference(value) || /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?$/.test(value);
 }
 
 function stripJsonComments(input: string): string {
@@ -148,6 +156,19 @@ function normalizeReference(
   }
 
   if (typeof value === "string") {
+    const resolvedPath = resolveReferencePath(referenceBaseDir, value);
+    if (!isExplicitGitReference(value) && existsSync(resolvedPath)) {
+      return {
+        alias,
+        kind: "local",
+        declaredPath: value,
+        resolvedPath,
+        hidden: false,
+        sourceConfigPath,
+        sourceType,
+      };
+    }
+
     if (looksLikeGitReference(value)) {
       return {
         alias,
@@ -159,7 +180,6 @@ function normalizeReference(
       };
     }
 
-    const resolvedPath = resolveReferencePath(referenceBaseDir, value);
     return {
       alias,
       kind: "local",
@@ -208,7 +228,7 @@ function normalizeReference(
   return undefined;
 }
 
-function collectConfigPaths(cwd: string): ConfigPath[] {
+function collectConfigPaths(cwd: string, options: LoadReferencesOptions = {}): ConfigPath[] {
   const paths: ConfigPath[] = [];
   const home = process.env.HOME;
 
@@ -222,21 +242,26 @@ function collectConfigPaths(cwd: string): ConfigPath[] {
     }
   }
 
-  for (const name of PROJECT_CONFIG_NAMES) {
-    const path = join(cwd, ".pi", name);
-    if (existsSync(path)) {
-      paths.push({ path, sourceType: "project", referenceBaseDir: cwd });
+  if (options.includeProject !== false) {
+    for (const name of PROJECT_CONFIG_NAMES) {
+      const path = join(cwd, ".pi", name);
+      if (existsSync(path)) {
+        paths.push({ path, sourceType: "project", referenceBaseDir: cwd });
+      }
     }
   }
 
   return paths;
 }
 
-export function loadReferences(cwd: string): { references: ResolvedReference[]; warnings: string[] } {
+export function loadReferences(
+  cwd: string,
+  options: LoadReferencesOptions = {},
+): { references: ResolvedReference[]; warnings: string[] } {
   const warnings: string[] = [];
   const merged = new Map<string, ResolvedReference>();
 
-  for (const entry of collectConfigPaths(cwd)) {
+  for (const entry of collectConfigPaths(cwd, options)) {
     try {
       const config = readConfigFile(entry.path);
       const refs = config.references ?? {};

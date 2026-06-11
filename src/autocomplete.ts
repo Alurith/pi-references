@@ -1,28 +1,12 @@
 import { readdirSync } from "node:fs";
-import { join } from "node:path";
 import type { AutocompleteItem, AutocompleteProvider, AutocompleteSuggestions } from "@earendil-works/pi-tui";
+import { resolveInsideRoot } from "./resolve";
+import { parseReferenceQueryAtCursor } from "./tokenize";
 import type { ResolvedReference } from "./types";
 
 const MAX_SUGGESTIONS = 50;
 
-function extractReferenceToken(textBeforeCursor: string): { aliasQuery: string; pathQuery?: string; prefix: string } | undefined {
-  const match = textBeforeCursor.match(/(?:^|[ \t])@([^\s@]*)$/);
-  if (!match) {
-    return undefined;
-  }
-
-  const token = match[1] ?? "";
-  const slashIndex = token.indexOf("/");
-  if (slashIndex === -1) {
-    return { aliasQuery: token, prefix: `@${token}` };
-  }
-
-  return {
-    aliasQuery: token.slice(0, slashIndex),
-    pathQuery: token.slice(slashIndex + 1),
-    prefix: `@${token}`,
-  };
-}
+type EnsureReferenceAvailable = (reference: ResolvedReference) => Promise<void>;
 
 function createAliasItem(reference: ResolvedReference): AutocompleteItem {
   return {
@@ -37,11 +21,19 @@ function listReferenceItems(reference: ResolvedReference, pathQuery: string): Au
     return [];
   }
 
-  const normalized = pathQuery.replace(/^\/+/, "");
+  if (pathQuery.startsWith("/")) {
+    return [];
+  }
+
+  const normalized = pathQuery;
   const segments = normalized.split("/");
   const partial = segments.pop() ?? "";
   const baseRelative = segments.filter(Boolean).join("/");
-  const baseDir = join(reference.resolvedPath, baseRelative);
+  const baseDir = resolveInsideRoot(reference.resolvedPath, baseRelative);
+
+  if (!baseDir) {
+    return [];
+  }
 
   let entries: ReturnType<typeof readdirSync>;
   try {
@@ -71,6 +63,7 @@ function listReferenceItems(reference: ResolvedReference, pathQuery: string): Au
 
 export function createReferencesAutocompleteProvider(
   references: ResolvedReference[],
+  ensureReferenceAvailable: EnsureReferenceAvailable,
 ): (current: AutocompleteProvider) => AutocompleteProvider {
   const visibleReferences = references.filter((reference) => !reference.hidden);
 
@@ -79,27 +72,55 @@ export function createReferencesAutocompleteProvider(
     async getSuggestions(lines, cursorLine, cursorCol, options): Promise<AutocompleteSuggestions | null> {
       const currentLine = lines[cursorLine] ?? "";
       const textBeforeCursor = currentLine.slice(0, cursorCol);
-      const token = extractReferenceToken(textBeforeCursor);
+      const token = parseReferenceQueryAtCursor(textBeforeCursor);
       if (!token) {
         return current.getSuggestions(lines, cursorLine, cursorCol, options);
       }
 
       if (token.pathQuery === undefined) {
-        const items = visibleReferences
+        const baseSuggestions = await current.getSuggestions(lines, cursorLine, cursorCol, options);
+
+        // Keep bare `@` native: Pi's built-in file autocomplete remains the default.
+        if (token.aliasQuery.length === 0) {
+          return baseSuggestions;
+        }
+
+        const referenceItems = visibleReferences
           .filter((reference) => reference.alias.toLowerCase().includes(token.aliasQuery.toLowerCase()))
           .slice(0, MAX_SUGGESTIONS)
           .map(createAliasItem);
 
-        if (items.length === 0) {
-          return current.getSuggestions(lines, cursorLine, cursorCol, options);
+        if (referenceItems.length === 0) {
+          return baseSuggestions;
         }
 
-        return { prefix: token.prefix, items };
+        const baseItems = baseSuggestions?.items ?? [];
+        const seen = new Set<string>();
+        const items = [...referenceItems, ...baseItems]
+          .filter((item) => {
+            const key = item.value;
+            if (seen.has(key)) {
+              return false;
+            }
+            seen.add(key);
+            return true;
+          })
+          .slice(0, MAX_SUGGESTIONS);
+
+        return {
+          prefix: baseSuggestions?.prefix ?? token.prefix,
+          items,
+        };
       }
 
       const reference = references.find((item) => item.alias === token.aliasQuery);
       if (!reference || reference.hidden) {
         return current.getSuggestions(lines, cursorLine, cursorCol, options);
+      }
+
+      await ensureReferenceAvailable(reference);
+      if (options.signal.aborted) {
+        return null;
       }
 
       const items = listReferenceItems(reference, token.pathQuery);
