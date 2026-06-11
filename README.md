@@ -310,3 +310,7 @@ This package is a Pi extension package. The package manifest declares:
 ```
 
 So Pi can install and load it directly with `pi install`.
+
+## License
+
+MIT. See [LICENSE](./LICENSE).

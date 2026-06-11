@@ -2,6 +2,7 @@
   "name": "pi-references",
   "version": "0.1.0",
   "description": "Pi extension that implements OpenCode-style references",
+  "license": "MIT",
   "type": "module",
   "repository": {
     "type": "git",
