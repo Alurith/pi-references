@@ -1,4 +1,4 @@
-import { readdirSync } from "node:fs";
+import { readdirSync, type Dirent } from "node:fs";
 import type { AutocompleteItem, AutocompleteProvider, AutocompleteSuggestions } from "@earendil-works/pi-tui";
 import { resolveInsideRoot } from "./resolve";
 import { parseReferenceQueryAtCursor } from "./tokenize";
@@ -35,9 +35,9 @@ function listReferenceItems(reference: ResolvedReference, pathQuery: string): Au
     return [];
   }
 
-  let entries: ReturnType<typeof readdirSync>;
+  let entries: Dirent<string>[];
   try {
-    entries = readdirSync(baseDir, { withFileTypes: true });
+    entries = readdirSync(baseDir, { withFileTypes: true, encoding: "utf8" });
   } catch {
     return [];
   }

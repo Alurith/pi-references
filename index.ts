@@ -1,7 +1,12 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createReferencesAutocompleteProvider } from "./src/autocomplete";
 import { loadReferences } from "./src/config";
-import { assignGitCachePaths, materializeGitReference } from "./src/git";
+import {
+  assignGitCachePaths,
+  materializeGitReference,
+  synchronizeAllGitReferences,
+} from "./src/git";
+import { registerReferenceCommands } from "./src/commands";
 import { expandReferencesInText, getReferencedAliases } from "./src/transform";
 import type { ResolvedReference } from "./src/types";
 
@@ -32,7 +37,9 @@ function referencesByAlias(references: ResolvedReference[]): Map<string, Resolve
 }
 
 export default function (pi: ExtensionAPI) {
-  pi.on("session_start", async (_event, ctx) => {
+  registerReferenceCommands(pi);
+
+  pi.on("session_start", (_event, ctx) => {
     const loaded = loadReferences(ctx.cwd, { includeProject: ctx.isProjectTrusted() });
     currentReferences = loaded.references;
     assignGitCachePaths(currentReferences);
@@ -53,6 +60,23 @@ export default function (pi: ExtensionAPI) {
     };
 
     ctx.ui.addAutocompleteProvider(createReferencesAutocompleteProvider(currentReferences, ensureReferenceAvailable));
+
+    // Clone and refresh all configured Git references in the background. Do not
+    // await this promise: Pi should finish startup while Git works asynchronously.
+    void synchronizeAllGitReferences(pi, currentReferences)
+      .then((results) => {
+        const failures = results.filter((result) => result.action === "failed");
+        if (failures.length === 0) {
+          return;
+        }
+
+        const aliases = failures.map((result) => result.alias).join(", ");
+        ctx.ui.notify(`Git references not synchronized: ${aliases}`, "warning");
+      })
+      .catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        ctx.ui.notify(`pi-references: background Git sync failed: ${message}`, "warning");
+      });
   });
 
   pi.on("input", async (event, ctx) => {

@@ -36,6 +36,57 @@ function looksLikeGitReference(value: string): boolean {
   return isExplicitGitReference(value) || /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?$/.test(value);
 }
 
+function looksLikeLocalPath(value: string): boolean {
+  return value === "." || value === ".." || value.startsWith("./") || value.startsWith("../") || value.startsWith("~/") || value.startsWith("/");
+}
+
+export function isValidReferenceAlias(alias: string): boolean {
+  return ALIAS_RE.test(alias);
+}
+
+export function classifyReferenceSource(
+  source: string,
+  referenceBaseDir: string,
+  branch?: string,
+):
+  | { kind: "local"; value: LocalReferenceConfig }
+  | { kind: "git"; value: GitReferenceConfig }
+  | undefined {
+  if (branch !== undefined) {
+    if (!branch.trim() || looksLikeLocalPath(source) || !looksLikeGitReference(source)) {
+      return undefined;
+    }
+
+    return {
+      kind: "git",
+      value: {
+        repository: source,
+        branch,
+      },
+    };
+  }
+
+  const resolvedPath = resolveReferencePath(referenceBaseDir, source);
+  if (looksLikeLocalPath(source) || (!isExplicitGitReference(source) && existsSync(resolvedPath))) {
+    return {
+      kind: "local",
+      value: { path: source },
+    };
+  }
+
+  if (looksLikeGitReference(source)) {
+    return {
+      kind: "git",
+      value: { repository: source },
+    };
+  }
+
+  return {
+    kind: "local",
+    value: { path: source },
+  };
+}
+
 function stripJsonComments(input: string): string {
   let output = "";
   let inString = false;
@@ -134,14 +185,17 @@ function stripTrailingCommas(input: string): string {
   return output;
 }
 
-function readConfigFile(path: string): ReferencesConfigFile {
-  const raw = readFileSync(path, "utf8");
-  const normalized = stripTrailingCommas(stripJsonComments(raw));
+export function parseReferencesConfigText(input: string): ReferencesConfigFile {
+  const normalized = stripTrailingCommas(stripJsonComments(input));
   const parsed = JSON.parse(normalized);
   if (!parsed || typeof parsed !== "object") {
     return {};
   }
   return parsed as ReferencesConfigFile;
+}
+
+function readConfigFile(path: string): ReferencesConfigFile {
+  return parseReferencesConfigText(readFileSync(path, "utf8"));
 }
 
 function normalizeReference(
@@ -151,7 +205,7 @@ function normalizeReference(
   sourceType: ReferenceSourceType,
   referenceBaseDir: string,
 ): ResolvedReference | undefined {
-  if (!ALIAS_RE.test(alias)) {
+  if (!isValidReferenceAlias(alias)) {
     return undefined;
   }
 

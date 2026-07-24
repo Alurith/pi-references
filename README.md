@@ -73,7 +73,13 @@ pi install -l npm:@alurith/pi-references
 
 ### Local development / quick test
 
-From a project where you want to test the extension:
+Install runtime dependencies first:
+
+```bash
+npm install
+```
+
+Then, from a project where you want to test the extension:
 
 ```bash
 pi -e /absolute/path/to/pi-references/index.ts
@@ -187,7 +193,7 @@ Git repositories are cloned into:
 ~/.pi/agent/cache/references/
 ```
 
-Existing cached checkouts are reused. Git repositories are cloned lazily the first time you browse or use that reference. The extension does not perform aggressive automatic updates.
+Git repositories are materialized in the background when the session starts. Missing repositories are cloned with depth 1 and only the selected branch; existing cached checkouts are refreshed shallowly. Startup does not wait for Git, but using a reference while its operation is still running waits for that reference to become available.
 
 ### Shorthand syntax
 
@@ -224,6 +230,23 @@ A hidden reference:
 - can still be used manually as `@internal` or `@internal/file.md`
 - is still added to agent context if it has a `description`
 
+## Managing references
+
+Add a project reference directly from Pi:
+
+```text
+/references add sdk OWNER/sdk-repo main
+/references add docs ../product-docs
+```
+
+Use `--global` to write the global configuration instead:
+
+```text
+/references add --global sdk OWNER/sdk-repo main
+```
+
+The command writes `.pi/references.json`/`.jsonc` (or the global equivalent) and tells you to run `/reload`. It does not reload the extension automatically.
+
 ## Usage
 
 Type `@` in the Pi prompt to see configured references.
@@ -238,7 +261,7 @@ Compare the current implementation with @sdk/src/client.ts
 Use @docs to check the product behavior before changing this flow
 ```
 
-When a reference is used, the extension expands it with its resolved filesystem path before the model receives the prompt. Git references are cloned at this point if needed:
+When a reference is used, the extension expands it with its resolved filesystem path before the model receives the prompt. If its background clone or refresh is still running, input waits for that reference:
 
 ```text
 @sdk/src/client.ts [resolved: /home/user/.pi/agent/cache/references/sdk-abc123/src/client.ts]
@@ -283,15 +306,15 @@ Implemented:
 - `hidden`
 - additive alias autocomplete that keeps Pi's native `@` file completion
 - file autocomplete inside references with path escape protection
-- lazy Git clone on first browse/use
+- background Git materialization and shallow refresh at session start
+- depth-1, single-branch Git clone
 - atomic Git clone into cache
 - input expansion to `[resolved: /real/path]`
 - shared tokenizer for autocomplete and input expansion
 
 Not implemented yet:
 
-- explicit manual sync command
-- aggressive automatic Git updates
+- explicit manual Git sync command
 - persistent file index/cache
 - recursive parent-directory config discovery
 - symlink boundary hardening
