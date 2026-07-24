@@ -261,13 +261,13 @@ Compare the current implementation with @sdk/src/client.ts
 Use @docs to check the product behavior before changing this flow
 ```
 
-When a reference is used, the extension expands it with its resolved filesystem path before the model receives the prompt. If its background clone or refresh is still running, input waits for that reference:
+When a reference is used, the extension expands it with its resolved filesystem path before the model receives the prompt. If its background clone or refresh is still running, input waits for that reference. The `[resolved: ...]` suffix is added only after the checkout has been verified or cloned successfully:
 
 ```text
 @sdk/src/client.ts [resolved: /home/user/.pi/agent/cache/references/sdk-abc123/src/client.ts]
 ```
 
-This keeps the user-facing syntax close to OpenCode while still giving Pi's tools a real path to inspect.
+If materialization fails, the original reference is left unchanged and an error is reported. This keeps the user-facing syntax close to OpenCode while still giving Pi's tools a real path to inspect.
 
 ## Agent context
 
@@ -287,11 +287,9 @@ References without `description` remain usable through `@alias`, but are not adv
 
 Reference aliases:
 
-- cannot be empty
-- cannot contain `/`
-- cannot contain whitespace
-- cannot contain backticks
-- cannot contain commas
+- start with an ASCII letter or digit
+- may contain only ASCII letters, digits, `.`, `_`, and `-`
+- cannot contain `/`, backslashes, whitespace, or punctuation such as `!`
 
 ## Current status
 
@@ -309,7 +307,10 @@ Implemented:
 - background Git materialization and shallow refresh at session start
 - depth-1, single-branch Git clone
 - atomic Git clone into cache
-- input expansion to `[resolved: /real/path]`
+- cache checkout origin validation before reuse
+- input expansion to `[resolved: /real/path]` only for available paths
+- realpath-based symlink boundary protection
+- cancellable Git work on session shutdown
 - shared tokenizer for autocomplete and input expansion
 
 Not implemented yet:
@@ -317,7 +318,6 @@ Not implemented yet:
 - explicit manual Git sync command
 - persistent file index/cache
 - recursive parent-directory config discovery
-- symlink boundary hardening
 - permission boundary changes
 
 ## Development

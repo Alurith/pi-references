@@ -1,16 +1,18 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { parse, type ParseError } from "jsonc-parser";
 import type {
   GitReferenceConfig,
   LocalReferenceConfig,
-  ReferenceConfigValue,
   ReferencesConfigFile,
   ReferenceSourceType,
   ResolvedReference,
 } from "./types";
 import { resolveReferencePath } from "./resolve";
 
-const ALIAS_RE = /^[^/\s`,]+$/;
+const ALIAS_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const BRANCH_RE = /^[^\s\0-][^\s\0]*$/;
 const GLOBAL_CONFIG_NAMES = ["references.json", "references.jsonc"];
 const PROJECT_CONFIG_NAMES = ["references.json", "references.jsonc"];
 
@@ -37,7 +39,15 @@ function looksLikeGitReference(value: string): boolean {
 }
 
 function looksLikeLocalPath(value: string): boolean {
-  return value === "." || value === ".." || value.startsWith("./") || value.startsWith("../") || value.startsWith("~/") || value.startsWith("/");
+  return value === "." || value === ".." || value.startsWith("./") || value.startsWith("../") || value.startsWith("~/") || value.startsWith("/") || value.startsWith("\\\\");
+}
+
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 export function isValidReferenceAlias(alias: string): boolean {
@@ -53,7 +63,7 @@ export function classifyReferenceSource(
   | { kind: "git"; value: GitReferenceConfig }
   | undefined {
   if (branch !== undefined) {
-    if (!branch.trim() || looksLikeLocalPath(source) || !looksLikeGitReference(source)) {
+    if (!BRANCH_RE.test(branch) || looksLikeLocalPath(source) || !looksLikeGitReference(source)) {
       return undefined;
     }
 
@@ -67,7 +77,7 @@ export function classifyReferenceSource(
   }
 
   const resolvedPath = resolveReferencePath(referenceBaseDir, source);
-  if (looksLikeLocalPath(source) || (!isExplicitGitReference(source) && existsSync(resolvedPath))) {
+  if (looksLikeLocalPath(source) || (!isExplicitGitReference(source) && isDirectory(resolvedPath))) {
     return {
       kind: "local",
       value: { path: source },
@@ -87,109 +97,18 @@ export function classifyReferenceSource(
   };
 }
 
-function stripJsonComments(input: string): string {
-  let output = "";
-  let inString = false;
-  let stringQuote = "";
-  let escaped = false;
-
-  for (let i = 0; i < input.length; i++) {
-    const char = input[i];
-    const next = input[i + 1];
-
-    if (inString) {
-      output += char;
-      if (escaped) {
-        escaped = false;
-      } else if (char === "\\") {
-        escaped = true;
-      } else if (char === stringQuote) {
-        inString = false;
-        stringQuote = "";
-      }
-      continue;
-    }
-
-    if (char === '"') {
-      inString = true;
-      stringQuote = char;
-      output += char;
-      continue;
-    }
-
-    if (char === "/" && next === "/") {
-      while (i < input.length && input[i] !== "\n") {
-        i++;
-      }
-      output += "\n";
-      continue;
-    }
-
-    if (char === "/" && next === "*") {
-      i += 2;
-      while (i < input.length && !(input[i] === "*" && input[i + 1] === "/")) {
-        if (input[i] === "\n") {
-          output += "\n";
-        }
-        i++;
-      }
-      i++;
-      continue;
-    }
-
-    output += char;
-  }
-
-  return output;
-}
-
-function stripTrailingCommas(input: string): string {
-  let output = "";
-  let inString = false;
-  let escaped = false;
-
-  for (let i = 0; i < input.length; i++) {
-    const char = input[i];
-
-    if (inString) {
-      output += char;
-      if (escaped) {
-        escaped = false;
-      } else if (char === "\\") {
-        escaped = true;
-      } else if (char === '"') {
-        inString = false;
-      }
-      continue;
-    }
-
-    if (char === '"') {
-      inString = true;
-      output += char;
-      continue;
-    }
-
-    if (char === ",") {
-      let j = i + 1;
-      while (j < input.length && /\s/.test(input[j] ?? "")) {
-        j++;
-      }
-      if (input[j] === "}" || input[j] === "]") {
-        continue;
-      }
-    }
-
-    output += char;
-  }
-
-  return output;
-}
-
 export function parseReferencesConfigText(input: string): ReferencesConfigFile {
-  const normalized = stripTrailingCommas(stripJsonComments(input));
-  const parsed = JSON.parse(normalized);
-  if (!parsed || typeof parsed !== "object") {
-    return {};
+  const errors: ParseError[] = [];
+  const parsed = parse(input, errors, { allowTrailingComma: true });
+  if (errors.length > 0) {
+    throw new Error(`Invalid JSONC at offset ${errors[0]?.offset ?? 0}`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Configuration must contain a valid JSON object");
+  }
+  if (parsed.references !== undefined &&
+      (!parsed.references || typeof parsed.references !== "object" || Array.isArray(parsed.references))) {
+    throw new Error('The "references" property must be an object');
   }
   return parsed as ReferencesConfigFile;
 }
@@ -200,7 +119,7 @@ function readConfigFile(path: string): ReferencesConfigFile {
 
 function normalizeReference(
   alias: string,
-  value: ReferenceConfigValue,
+  value: unknown,
   sourceConfigPath: string,
   sourceType: ReferenceSourceType,
   referenceBaseDir: string,
@@ -210,8 +129,12 @@ function normalizeReference(
   }
 
   if (typeof value === "string") {
+    if (!value.trim()) {
+      return undefined;
+    }
+
     const resolvedPath = resolveReferencePath(referenceBaseDir, value);
-    if (!isExplicitGitReference(value) && existsSync(resolvedPath)) {
+    if (looksLikeLocalPath(value) || (!isExplicitGitReference(value) && isDirectory(resolvedPath))) {
       return {
         alias,
         kind: "local",
@@ -220,6 +143,7 @@ function normalizeReference(
         hidden: false,
         sourceConfigPath,
         sourceType,
+        referenceBaseDir,
       };
     }
 
@@ -231,6 +155,7 @@ function normalizeReference(
         hidden: false,
         sourceConfigPath,
         sourceType,
+        referenceBaseDir,
       };
     }
 
@@ -242,17 +167,18 @@ function normalizeReference(
       hidden: false,
       sourceConfigPath,
       sourceType,
+      referenceBaseDir,
     };
   }
 
-  if (!value || typeof value !== "object") {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
     return undefined;
   }
 
   const maybeLocal = value as Partial<LocalReferenceConfig>;
   const maybeGit = value as Partial<GitReferenceConfig>;
 
-  if (typeof maybeLocal.path === "string" && maybeGit.repository === undefined) {
+  if (typeof maybeLocal.path === "string" && maybeLocal.path.trim() && maybeGit.repository === undefined) {
     const resolvedPath = resolveReferencePath(referenceBaseDir, maybeLocal.path);
     return {
       alias,
@@ -263,10 +189,14 @@ function normalizeReference(
       description: typeof maybeLocal.description === "string" ? maybeLocal.description : undefined,
       sourceConfigPath,
       sourceType,
+      referenceBaseDir,
     };
   }
 
-  if (typeof maybeGit.repository === "string" && maybeLocal.path === undefined) {
+  if (typeof maybeGit.repository === "string" && maybeGit.repository.trim() && maybeLocal.path === undefined) {
+    if (maybeGit.branch !== undefined && (typeof maybeGit.branch !== "string" || !BRANCH_RE.test(maybeGit.branch))) {
+      return undefined;
+    }
     return {
       alias,
       kind: "git",
@@ -276,6 +206,7 @@ function normalizeReference(
       description: typeof maybeGit.description === "string" ? maybeGit.description : undefined,
       sourceConfigPath,
       sourceType,
+      referenceBaseDir,
     };
   }
 
@@ -284,21 +215,21 @@ function normalizeReference(
 
 function collectConfigPaths(cwd: string, options: LoadReferencesOptions = {}): ConfigPath[] {
   const paths: ConfigPath[] = [];
-  const home = process.env.HOME;
+  const referenceBaseDir = getAgentDir();
 
-  if (home) {
-    const referenceBaseDir = join(home, ".pi", "agent");
+  {
+    const globalBaseDir = referenceBaseDir;
     for (const name of GLOBAL_CONFIG_NAMES) {
-      const path = join(referenceBaseDir, name);
+      const path = join(globalBaseDir, name);
       if (existsSync(path)) {
-        paths.push({ path, sourceType: "global", referenceBaseDir });
+        paths.push({ path, sourceType: "global", referenceBaseDir: globalBaseDir });
       }
     }
   }
 
   if (options.includeProject !== false) {
     for (const name of PROJECT_CONFIG_NAMES) {
-      const path = join(cwd, ".pi", name);
+      const path = join(cwd, CONFIG_DIR_NAME, name);
       if (existsSync(path)) {
         paths.push({ path, sourceType: "project", referenceBaseDir: cwd });
       }
@@ -320,14 +251,21 @@ export function loadReferences(
       const config = readConfigFile(entry.path);
       const refs = config.references ?? {};
       for (const [alias, value] of Object.entries(refs)) {
+        // A project declaration shadows the global alias even when invalid or
+        // pointing to a missing path. Falling back to a global value is unsafe
+        // and contradicts the documented precedence rules.
+        if (entry.sourceType === "project") {
+          merged.delete(alias);
+        }
+
         const normalized = normalizeReference(alias, value, entry.path, entry.sourceType, entry.referenceBaseDir);
         if (!normalized) {
           warnings.push(`Invalid reference "${alias}" in ${entry.path}`);
           continue;
         }
 
-        if (normalized.kind === "local" && normalized.resolvedPath && !existsSync(normalized.resolvedPath)) {
-          warnings.push(`Reference "${alias}" points to a missing path: ${normalized.resolvedPath}`);
+        if (normalized.kind === "local" && normalized.resolvedPath && !isDirectory(normalized.resolvedPath)) {
+          warnings.push(`Reference "${alias}" points to a missing or non-directory path: ${normalized.resolvedPath}`);
           continue;
         }
 

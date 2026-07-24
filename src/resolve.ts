@@ -1,5 +1,6 @@
+import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, relative, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
 export function expandHome(input: string): string {
   if (input === "~") {
@@ -19,6 +20,16 @@ export function resolveReferencePath(baseDir: string, declaredPath: string): str
   return resolve(baseDir, expanded);
 }
 
+function isInside(root: string, target: string): boolean {
+  const relativePath = relative(root, target);
+  return relativePath === "" || (!relativePath.startsWith(`..${sep}`) && relativePath !== ".." && !isAbsolute(relativePath));
+}
+
+/**
+ * Resolve a path below a root while checking both lexical traversal and the
+ * real filesystem boundary. The nearest existing ancestor is checked when the
+ * requested target does not exist yet.
+ */
 export function resolveInsideRoot(root: string, rawSubpath: string | undefined): string | undefined {
   const resolvedRoot = resolve(root);
   const subpath = rawSubpath ?? "";
@@ -28,10 +39,29 @@ export function resolveInsideRoot(root: string, rawSubpath: string | undefined):
   }
 
   const target = resolve(resolvedRoot, subpath);
-  const relativePath = relative(resolvedRoot, target);
-  if (relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath))) {
-    return target;
+  if (!isInside(resolvedRoot, target) || !existsSync(resolvedRoot)) {
+    return undefined;
   }
 
-  return undefined;
+  let canonicalRoot: string;
+  try {
+    canonicalRoot = realpathSync.native(resolvedRoot);
+  } catch {
+    return undefined;
+  }
+
+  let existing = target;
+  while (!existsSync(existing)) {
+    const parent = dirname(existing);
+    if (parent === existing) {
+      return undefined;
+    }
+    existing = parent;
+  }
+
+  try {
+    return isInside(canonicalRoot, realpathSync.native(existing)) ? target : undefined;
+  } catch {
+    return undefined;
+  }
 }

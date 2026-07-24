@@ -1,22 +1,30 @@
-import { readdirSync, type Dirent } from "node:fs";
+import { type Dirent } from "node:fs";
+import { readdir } from "node:fs/promises";
 import type { AutocompleteItem, AutocompleteProvider, AutocompleteSuggestions } from "@earendil-works/pi-tui";
 import { resolveInsideRoot } from "./resolve";
 import { parseReferenceQueryAtCursor } from "./tokenize";
 import type { ResolvedReference } from "./types";
 
 const MAX_SUGGESTIONS = 50;
+const DIRECTORY_CACHE_TTL_MS = 500;
+const MAX_DIRECTORY_CACHE_ENTRIES = 128;
+const directoryCache = new Map<string, { expiresAt: number; entries: Dirent<string>[] }>();
 
-type EnsureReferenceAvailable = (reference: ResolvedReference) => Promise<void>;
+type EnsureReferenceAvailable = (reference: ResolvedReference, signal?: AbortSignal) => Promise<void>;
 
 function createAliasItem(reference: ResolvedReference): AutocompleteItem {
-  return {
+  const item: AutocompleteItem = {
     value: `@${reference.alias}`,
     label: `@${reference.alias}`,
-    description: reference.description ?? reference.resolvedPath ?? reference.repository,
   };
+  const description = reference.description ?? reference.resolvedPath ?? reference.repository;
+  if (description) {
+    item.description = description;
+  }
+  return item;
 }
 
-function listReferenceItems(reference: ResolvedReference, pathQuery: string): AutocompleteItem[] {
+async function listReferenceItems(reference: ResolvedReference, pathQuery: string): Promise<AutocompleteItem[]> {
   if (!reference.resolvedPath) {
     return [];
   }
@@ -35,11 +43,21 @@ function listReferenceItems(reference: ResolvedReference, pathQuery: string): Au
     return [];
   }
 
+  const cached = directoryCache.get(baseDir);
   let entries: Dirent<string>[];
-  try {
-    entries = readdirSync(baseDir, { withFileTypes: true, encoding: "utf8" });
-  } catch {
-    return [];
+  if (cached && cached.expiresAt > Date.now()) {
+    entries = cached.entries;
+  } else {
+    try {
+      entries = await readdir(baseDir, { withFileTypes: true, encoding: "utf8" });
+    } catch {
+      return [];
+    }
+    directoryCache.set(baseDir, { expiresAt: Date.now() + DIRECTORY_CACHE_TTL_MS, entries });
+    if (directoryCache.size > MAX_DIRECTORY_CACHE_ENTRIES) {
+      const oldest = directoryCache.keys().next().value;
+      if (oldest) directoryCache.delete(oldest);
+    }
   }
 
   return entries
@@ -65,8 +83,6 @@ export function createReferencesAutocompleteProvider(
   references: ResolvedReference[],
   ensureReferenceAvailable: EnsureReferenceAvailable,
 ): (current: AutocompleteProvider) => AutocompleteProvider {
-  const visibleReferences = references.filter((reference) => !reference.hidden);
-
   return (current) => ({
     triggerCharacters: ["@"],
     async getSuggestions(lines, cursorLine, cursorCol, options): Promise<AutocompleteSuggestions | null> {
@@ -76,6 +92,9 @@ export function createReferencesAutocompleteProvider(
       if (!token) {
         return current.getSuggestions(lines, cursorLine, cursorCol, options);
       }
+
+      const availableReferences = references;
+      const visibleReferences = availableReferences.filter((reference) => !reference.hidden);
 
       if (token.pathQuery === undefined) {
         const baseSuggestions = await current.getSuggestions(lines, cursorLine, cursorCol, options);
@@ -113,17 +132,17 @@ export function createReferencesAutocompleteProvider(
         };
       }
 
-      const reference = references.find((item) => item.alias === token.aliasQuery);
+      const reference = availableReferences.find((item) => item.alias === token.aliasQuery);
       if (!reference || reference.hidden) {
         return current.getSuggestions(lines, cursorLine, cursorCol, options);
       }
 
-      await ensureReferenceAvailable(reference);
+      await ensureReferenceAvailable(reference, options.signal);
       if (options.signal.aborted) {
         return null;
       }
 
-      const items = listReferenceItems(reference, token.pathQuery);
+      const items = await listReferenceItems(reference, token.pathQuery);
       if (items.length === 0) {
         return current.getSuggestions(lines, cursorLine, cursorCol, options);
       }

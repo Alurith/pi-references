@@ -1,12 +1,13 @@
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { applyEdits, modify, parse, type ParseError } from "jsonc-parser";
 import {
   classifyReferenceSource,
   isValidReferenceAlias,
 } from "./config";
+import { resolveReferencePath } from "./resolve";
 import type { ReferenceConfigValue } from "./types";
 
 export type ReferenceScope = "project" | "global";
@@ -30,12 +31,12 @@ type ConfigTarget = {
 };
 
 function getGlobalBaseDir(): string {
-  return join(homedir(), ".pi", "agent");
+  return getAgentDir();
 }
 
 export function getWritableConfigPath(cwd: string, scope: ReferenceScope): ConfigTarget {
   const baseDir = scope === "global" ? getGlobalBaseDir() : cwd;
-  const configDir = scope === "global" ? baseDir : join(cwd, ".pi");
+  const configDir = scope === "global" ? baseDir : join(cwd, CONFIG_DIR_NAME);
   const jsoncPath = join(configDir, "references.jsonc");
   const jsonPath = join(configDir, "references.json");
 
@@ -98,9 +99,24 @@ export async function addReferenceToConfig(
   }
 
   const target = getWritableConfigPath(cwd, request.scope);
-  const classified = classifyReferenceSource(request.source, target.baseDir, request.branch);
+  const source = request.source.trim();
+  if (!source) {
+    throw new Error("Reference path or repository cannot be empty");
+  }
+  const classified = classifyReferenceSource(source, target.baseDir, request.branch?.trim());
   if (!classified) {
     throw new Error("Invalid repository or branch");
+  }
+
+  if (classified.kind === "local") {
+    const resolvedPath = resolveReferencePath(target.baseDir, classified.value.path);
+    try {
+      if (!statSync(resolvedPath).isDirectory()) {
+        throw new Error("not a directory");
+      }
+    } catch {
+      throw new Error(`Local reference path does not exist or is not a directory: ${resolvedPath}`);
+    }
   }
 
   const value = classified.value;
