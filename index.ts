@@ -13,6 +13,7 @@ import type { ResolvedReference } from "./src/types";
 let currentReferences: ResolvedReference[] = [];
 let sessionAbortController: AbortController | undefined;
 let sessionGeneration = 0;
+let sessionSyncPromise: Promise<void> | undefined;
 let autocompleteRegistered = false;
 
 function sanitizeDescription(description: string): string {
@@ -70,7 +71,7 @@ export default function (pi: ExtensionAPI) {
       }
 
       const warning = await materializeGitReference(pi, reference, { signal: signal ?? controller.signal });
-      if (warning && generation === sessionGeneration && !controller.signal.aborted) {
+      if (warning && generation === sessionGeneration && !controller.signal.aborted && !signal?.aborted) {
         ctx.ui.notify(`pi-references: ${warning}`, "error");
       }
     };
@@ -82,7 +83,7 @@ export default function (pi: ExtensionAPI) {
 
     // Clone and refresh all configured Git references in the background. Do not
     // await this promise: Pi should finish startup while Git works asynchronously.
-    void synchronizeAllGitReferences(pi, currentReferences, { signal: controller.signal })
+    const syncPromise = synchronizeAllGitReferences(pi, currentReferences, { signal: controller.signal })
       .then((results) => {
         if (generation !== sessionGeneration || controller.signal.aborted) {
           return;
@@ -102,12 +103,22 @@ export default function (pi: ExtensionAPI) {
         const message = error instanceof Error ? error.message : String(error);
         ctx.ui.notify(`pi-references: background Git sync failed: ${message}`, "warning");
       });
+    sessionSyncPromise = syncPromise;
   });
 
-  pi.on("session_shutdown", () => {
+  pi.on("session_shutdown", async () => {
+    const syncPromise = sessionSyncPromise;
     sessionAbortController?.abort();
     sessionAbortController = undefined;
     sessionGeneration++;
+
+    // Do not let the next session reuse a cache directory while the previous
+    // Git operation is still cleaning it up.
+    await syncPromise;
+    if (sessionSyncPromise === syncPromise) {
+      sessionSyncPromise = undefined;
+    }
+
     currentReferences.splice(0, currentReferences.length);
     autocompleteRegistered = false;
   });
@@ -132,6 +143,10 @@ export default function (pi: ExtensionAPI) {
       if (warning && inputGeneration === sessionGeneration && !inputSignal?.aborted) {
         ctx.ui.notify(`pi-references: ${warning}`, "error");
       }
+    }
+
+    if (inputGeneration !== sessionGeneration || inputSignal?.aborted) {
+      return { action: "continue" as const };
     }
 
     const transformedText = expandReferencesInText(event.text, currentReferences);

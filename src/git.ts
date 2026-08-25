@@ -29,7 +29,6 @@ export type GitSyncResult = {
 
 type InFlightOperation = {
   promise: Promise<GitOperationResult>;
-  signal?: AbortSignal;
 };
 
 const inFlightOperations = new Map<string, InFlightOperation>();
@@ -148,14 +147,12 @@ function applyOperationResult(
 function runExclusiveGitOperation(
   targetDir: string,
   operation: () => Promise<GitOperationResult>,
-  signal?: AbortSignal,
 ): Promise<GitOperationResult> {
   const existing = inFlightOperations.get(targetDir);
-  if (existing && !existing.signal?.aborted) {
-    return existing.promise;
-  }
   if (existing) {
-    inFlightOperations.delete(targetDir);
+    // Keep the slot until the operation settles; replacing an aborted operation
+    // early could let two clones mutate the same cache directory concurrently.
+    return existing.promise;
   }
 
   const promise = operation()
@@ -166,7 +163,7 @@ function runExclusiveGitOperation(
       }
     });
 
-  inFlightOperations.set(targetDir, { promise, signal });
+  inFlightOperations.set(targetDir, { promise });
   return promise;
 }
 
@@ -331,7 +328,7 @@ export async function materializeGitReference(
     }
 
     return cloneReference(pi, reference, targetDir, options);
-  }, options.signal);
+  });
 
   applyOperationResult(reference, targetDir, result);
   return result.warning;
@@ -355,7 +352,7 @@ export async function synchronizeGitReference(
     }
 
     return cloneReference(pi, reference, targetDir, options);
-  }, options.signal);
+  });
 
   applyOperationResult(reference, targetDir, result);
   return {

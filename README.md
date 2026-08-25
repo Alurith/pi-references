@@ -25,7 +25,15 @@ The goal is to bring the behavior described in OpenCode's references documentati
 - Autocomplete for reference aliases
 - File browsing autocomplete inside reference directories
 - Input expansion to resolved filesystem paths
-- Git repository cache under `~/.pi/agent/cache/references/`
+- Git repository cache under Pi's agent directory (`~/.pi/agent/cache/references/` by default)
+
+## Compatibilità
+
+- Pi **0.84.3** (o versioni compatibili dell'Extension API)
+- Node.js **>=22.19.0**, come richiesto da Pi 0.84.3
+
+L'estensione usa `CONFIG_DIR_NAME` e `getAgentDir()` esportati da Pi. I percorsi
+`.pi` e `~/.pi/agent` riportati sotto sono quindi i valori predefiniti.
 
 ## Installation
 
@@ -77,6 +85,8 @@ Install runtime dependencies first:
 
 ```bash
 npm install
+npm run check
+npm test
 ```
 
 Then, from a project where you want to test the extension:
@@ -134,6 +144,8 @@ To make Pi load the extension, use `pi install ...`, or load it explicitly with 
 .pi/references.jsonc
 ```
 
+(`.pi` è la project config directory predefinita di Pi.)
+
 Relative paths in project config are resolved from the project root.
 
 ### Global config
@@ -142,6 +154,9 @@ Relative paths in project config are resolved from the project root.
 ~/.pi/agent/references.json
 ~/.pi/agent/references.jsonc
 ```
+
+(`~/.pi/agent` è l'agent directory predefinita di Pi; può essere modificata
+tramite `PI_CODING_AGENT_DIR`.)
 
 Relative paths in global config are resolved from `~/.pi/agent`.
 
@@ -192,6 +207,8 @@ Git repositories are cloned into:
 ```text
 ~/.pi/agent/cache/references/
 ```
+
+Il percorso effettivo segue l'agent directory restituita da Pi.
 
 Git repositories are materialized in the background when the session starts. Missing repositories are cloned with depth 1 and only the selected branch; existing cached checkouts are refreshed shallowly. Startup does not wait for Git, but using a reference while its operation is still running waits for that reference to become available.
 

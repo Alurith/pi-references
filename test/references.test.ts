@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
+import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 import { loadReferences, parseReferencesConfigText, isValidReferenceAlias } from "../src/config";
 import { materializeGitReference } from "../src/git";
 import { resolveInsideRoot } from "../src/resolve";
@@ -45,9 +46,9 @@ describe("reference configuration", () => {
     const agentDir = join(root, "agent");
     const project = join(root, "project");
     await mkdir(join(agentDir), { recursive: true });
-    await mkdir(join(project, ".pi"), { recursive: true });
+    await mkdir(join(project, CONFIG_DIR_NAME), { recursive: true });
     await writeFile(join(agentDir, "references.json"), JSON.stringify({ references: { docs: "../global-docs" } }));
-    await writeFile(join(project, ".pi", "references.json"), JSON.stringify({ references: { docs: "./missing" } }));
+    await writeFile(join(project, CONFIG_DIR_NAME, "references.json"), JSON.stringify({ references: { docs: "./missing" } }));
     process.env.PI_CODING_AGENT_DIR = agentDir;
 
     const loaded = loadReferences(project);
@@ -119,5 +120,48 @@ describe("Git materialization", () => {
     assert.equal(expandReferencesInText("@broken/src/index.ts", [reference]), "@broken/src/index.ts");
     assert.equal(calls[0]?.includes("--"), true);
     assert.equal(reference.cachePath ? existsSync(reference.cachePath) : false, false);
+  });
+
+  it("keeps an aborted Git operation exclusive until it settles", async () => {
+    const root = await temporaryDirectory();
+    process.env.PI_CODING_AGENT_DIR = root;
+    let releaseClone!: () => void;
+    let markCloneStarted!: () => void;
+    const cloneStarted = new Promise<void>((resolve) => {
+      markCloneStarted = resolve;
+    });
+    const calls: string[][] = [];
+    const pi = {
+      exec: async (_command: string, args: string[]) => {
+        calls.push(args);
+        if (args[0] !== "clone") {
+          return { code: 1, stdout: "", stderr: "" };
+        }
+        markCloneStarted();
+        await new Promise<void>((resolve) => {
+          releaseClone = resolve;
+        });
+        return { code: 128, stdout: "", stderr: "clone failed" };
+      },
+    } as never;
+    const first: ResolvedReference = {
+      alias: "shared",
+      kind: "git",
+      repository: "owner/missing",
+      hidden: false,
+      sourceConfigPath: "test",
+      sourceType: "project",
+    };
+    const second = { ...first };
+    const controller = new AbortController();
+
+    const firstOperation = materializeGitReference(pi, first, { signal: controller.signal });
+    await cloneStarted;
+    controller.abort();
+    const secondOperation = materializeGitReference(pi, second);
+
+    assert.equal(calls.filter((args) => args[0] === "clone").length, 1);
+    releaseClone();
+    await Promise.all([firstOperation, secondOperation]);
   });
 });

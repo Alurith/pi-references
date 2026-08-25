@@ -24,8 +24,12 @@ function createAliasItem(reference: ResolvedReference): AutocompleteItem {
   return item;
 }
 
-async function listReferenceItems(reference: ResolvedReference, pathQuery: string): Promise<AutocompleteItem[]> {
-  if (!reference.resolvedPath) {
+async function listReferenceItems(
+  reference: ResolvedReference,
+  pathQuery: string,
+  signal?: AbortSignal,
+): Promise<AutocompleteItem[]> {
+  if (!reference.resolvedPath || signal?.aborted) {
     return [];
   }
 
@@ -51,6 +55,9 @@ async function listReferenceItems(reference: ResolvedReference, pathQuery: strin
     try {
       entries = await readdir(baseDir, { withFileTypes: true, encoding: "utf8" });
     } catch {
+      return [];
+    }
+    if (signal?.aborted) {
       return [];
     }
     directoryCache.set(baseDir, { expiresAt: Date.now() + DIRECTORY_CACHE_TTL_MS, entries });
@@ -142,7 +149,10 @@ export function createReferencesAutocompleteProvider(
         return null;
       }
 
-      const items = await listReferenceItems(reference, token.pathQuery);
+      const items = await listReferenceItems(reference, token.pathQuery, options.signal);
+      if (options.signal.aborted) {
+        return null;
+      }
       if (items.length === 0) {
         return current.getSuggestions(lines, cursorLine, cursorCol, options);
       }
