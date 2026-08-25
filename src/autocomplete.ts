@@ -100,8 +100,7 @@ export function createReferencesAutocompleteProvider(
         return current.getSuggestions(lines, cursorLine, cursorCol, options);
       }
 
-      const availableReferences = references;
-      const visibleReferences = availableReferences.filter((reference) => !reference.hidden);
+      const visibleReferences = references.filter((reference) => !reference.hidden);
 
       if (token.pathQuery === undefined) {
         const baseSuggestions = await current.getSuggestions(lines, cursorLine, cursorCol, options);
@@ -139,7 +138,7 @@ export function createReferencesAutocompleteProvider(
         };
       }
 
-      const reference = availableReferences.find((item) => item.alias === token.aliasQuery);
+      const reference = references.find((item) => item.alias === token.aliasQuery);
       if (!reference || reference.hidden) {
         return current.getSuggestions(lines, cursorLine, cursorCol, options);
       }

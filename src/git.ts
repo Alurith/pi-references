@@ -129,9 +129,6 @@ function applyOperationResult(
   targetDir: string,
   result: GitOperationResult,
 ): void {
-  reference.cachePath = targetDir;
-  reference.error = result.warning;
-
   // A failed clone must not be exposed as a usable filesystem path. An
   // existing checkout remains usable when only its refresh failed.
   if (result.action === "failed") {
@@ -165,18 +162,6 @@ function runExclusiveGitOperation(
 
   inFlightOperations.set(targetDir, { promise });
   return promise;
-}
-
-export function assignGitCachePaths(references: ResolvedReference[]): void {
-  for (const reference of references) {
-    const targetDir = getTargetDir(reference);
-    if (targetDir) {
-      reference.cachePath = targetDir;
-      // Do not mark the cache path as resolved until its origin has been
-      // verified or it has been materialized successfully.
-      reference.resolvedPath = undefined;
-    }
-  }
 }
 
 async function cloneReference(
@@ -342,7 +327,6 @@ export async function synchronizeGitReference(
   const targetDir = getTargetDir(reference);
   if (!targetDir) {
     const warning = `Reference "${reference.alias}" is missing repository`;
-    reference.error = warning;
     return { alias: reference.alias, action: "failed", warning };
   }
 
@@ -383,7 +367,6 @@ export async function synchronizeAllGitReferences(
 
     const reference = gitReferences[index];
     const warning = errorMessage(result.reason);
-    reference.error = warning;
     return {
       alias: reference.alias,
       action: "failed",

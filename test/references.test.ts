@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
@@ -12,13 +11,10 @@ import { expandReferencesInText } from "../src/transform";
 import { findReferenceTokens, parseReferenceQueryAtCursor } from "../src/tokenize";
 import type { ResolvedReference } from "../src/types";
 
-const originalHome = process.env.HOME;
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
-  if (originalHome === undefined) delete process.env.HOME;
-  else process.env.HOME = originalHome;
   if (originalAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
   else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
 
@@ -103,8 +99,6 @@ describe("Git materialization", () => {
       kind: "git" as const,
       repository: "owner/missing",
       hidden: false,
-      sourceConfigPath: "test",
-      sourceType: "project" as const,
     };
     const calls: string[][] = [];
     const pi = {
@@ -119,7 +113,6 @@ describe("Git materialization", () => {
     assert.equal(reference.resolvedPath, undefined);
     assert.equal(expandReferencesInText("@broken/src/index.ts", [reference]), "@broken/src/index.ts");
     assert.equal(calls[0]?.includes("--"), true);
-    assert.equal(reference.cachePath ? existsSync(reference.cachePath) : false, false);
   });
 
   it("keeps an aborted Git operation exclusive until it settles", async () => {
@@ -149,8 +142,6 @@ describe("Git materialization", () => {
       kind: "git",
       repository: "owner/missing",
       hidden: false,
-      sourceConfigPath: "test",
-      sourceType: "project",
     };
     const second = { ...first };
     const controller = new AbortController();

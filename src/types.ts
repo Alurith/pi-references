@@ -24,15 +24,9 @@ export type ResolvedReference = {
   kind: "local" | "git";
   hidden: boolean;
   description?: string;
-  sourceConfigPath: string;
-  sourceType: ReferenceSourceType;
   referenceBaseDir?: string;
-  declaredPath?: string;
   repository?: string;
   branch?: string;
-  /** Directory in the Git cache; populated before materialization. */
-  cachePath?: string;
   /** A path that is known to exist and is safe to expose to the agent. */
   resolvedPath?: string;
-  error?: string;
 };

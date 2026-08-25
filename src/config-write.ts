@@ -2,10 +2,11 @@ import { existsSync, statSync } from "node:fs";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
-import { applyEdits, modify, parse, type ParseError } from "jsonc-parser";
+import { applyEdits, modify } from "jsonc-parser";
 import {
   classifyReferenceSource,
   isValidReferenceAlias,
+  parseReferencesConfigText,
 } from "./config";
 import { resolveReferencePath } from "./resolve";
 import type { ReferenceConfigValue } from "./types";
@@ -21,7 +22,6 @@ export type AddReferenceRequest = {
 
 export type AddReferenceResult = {
   configPath: string;
-  createdConfig: boolean;
 };
 
 type ConfigTarget = {
@@ -30,12 +30,8 @@ type ConfigTarget = {
   exists: boolean;
 };
 
-function getGlobalBaseDir(): string {
-  return getAgentDir();
-}
-
 export function getWritableConfigPath(cwd: string, scope: ReferenceScope): ConfigTarget {
-  const baseDir = scope === "global" ? getGlobalBaseDir() : cwd;
+  const baseDir = scope === "global" ? getAgentDir() : cwd;
   const configDir = scope === "global" ? baseDir : join(cwd, CONFIG_DIR_NAME);
   const jsoncPath = join(configDir, "references.jsonc");
   const jsonPath = join(configDir, "references.json");
@@ -49,15 +45,6 @@ export function getWritableConfigPath(cwd: string, scope: ReferenceScope): Confi
   }
 
   return { path: jsoncPath, baseDir, exists: false };
-}
-
-function parseConfig(rawConfig: string): Record<string, unknown> {
-  const errors: ParseError[] = [];
-  const parsed = parse(rawConfig, errors, { allowTrailingComma: true });
-  if (errors.length > 0 || !parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error("Configuration must contain a valid JSON object");
-  }
-  return parsed as Record<string, unknown>;
 }
 
 function updateConfig(
@@ -121,7 +108,7 @@ export async function addReferenceToConfig(
 
   const value = classified.value;
   const rawConfig = target.exists ? await readFile(target.path, "utf8") : "{}\n";
-  const parsed = parseConfig(rawConfig);
+  const parsed = parseReferencesConfigText(rawConfig);
   const references = parsed.references;
 
   if (references !== undefined) {
@@ -139,6 +126,5 @@ export async function addReferenceToConfig(
 
   return {
     configPath: target.path,
-    createdConfig: !target.exists,
   };
 }

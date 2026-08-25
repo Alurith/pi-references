@@ -15,7 +15,6 @@
     "references"
   ],
   "scripts": {
-    "build": "tsc --noEmit",
     "check": "tsc --noEmit",
     "test": "node --import tsx --test test/*.test.ts"
   },
@@ -35,14 +34,10 @@
     "typescript": "^5.9.3"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*"
+    "@earendil-works/pi-coding-agent": "*"
   },
   "peerDependenciesMeta": {
     "@earendil-works/pi-coding-agent": {
-      "optional": true
-    },
-    "@earendil-works/pi-tui": {
       "optional": true
     }
   }

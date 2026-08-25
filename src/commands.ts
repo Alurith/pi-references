@@ -11,9 +11,7 @@ import {
 export function registerReferenceCommands(pi: ExtensionAPI): void {
   pi.registerCommand("references", {
     description: "Add a pi-references entry",
-    handler: async (args, ctx) => {
-      await handleReferencesCommand(args, ctx);
-    },
+    handler: handleReferencesCommand,
   });
 }
 

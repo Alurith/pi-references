@@ -13,17 +13,12 @@ import { resolveReferencePath } from "./resolve";
 
 const ALIAS_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const BRANCH_RE = /^[^\s\0-][^\s\0]*$/;
-const GLOBAL_CONFIG_NAMES = ["references.json", "references.jsonc"];
-const PROJECT_CONFIG_NAMES = ["references.json", "references.jsonc"];
+const CONFIG_NAMES = ["references.json", "references.jsonc"];
 
 type ConfigPath = {
   path: string;
   sourceType: ReferenceSourceType;
   referenceBaseDir: string;
-};
-
-export type LoadReferencesOptions = {
-  includeProject?: boolean;
 };
 
 function isExplicitGitReference(value: string): boolean {
@@ -113,15 +108,9 @@ export function parseReferencesConfigText(input: string): ReferencesConfigFile {
   return parsed as ReferencesConfigFile;
 }
 
-function readConfigFile(path: string): ReferencesConfigFile {
-  return parseReferencesConfigText(readFileSync(path, "utf8"));
-}
-
 function normalizeReference(
   alias: string,
   value: unknown,
-  sourceConfigPath: string,
-  sourceType: ReferenceSourceType,
   referenceBaseDir: string,
 ): ResolvedReference | undefined {
   if (!isValidReferenceAlias(alias)) {
@@ -133,40 +122,26 @@ function normalizeReference(
       return undefined;
     }
 
-    const resolvedPath = resolveReferencePath(referenceBaseDir, value);
-    if (looksLikeLocalPath(value) || (!isExplicitGitReference(value) && isDirectory(resolvedPath))) {
+    const classified = classifyReferenceSource(value, referenceBaseDir);
+    if (!classified) {
+      return undefined;
+    }
+
+    if (classified.kind === "local") {
       return {
         alias,
         kind: "local",
-        declaredPath: value,
-        resolvedPath,
+        resolvedPath: resolveReferencePath(referenceBaseDir, value),
         hidden: false,
-        sourceConfigPath,
-        sourceType,
-        referenceBaseDir,
-      };
-    }
-
-    if (looksLikeGitReference(value)) {
-      return {
-        alias,
-        kind: "git",
-        repository: value,
-        hidden: false,
-        sourceConfigPath,
-        sourceType,
         referenceBaseDir,
       };
     }
 
     return {
       alias,
-      kind: "local",
-      declaredPath: value,
-      resolvedPath,
+      kind: "git",
+      repository: value,
       hidden: false,
-      sourceConfigPath,
-      sourceType,
       referenceBaseDir,
     };
   }
@@ -183,12 +158,9 @@ function normalizeReference(
     return {
       alias,
       kind: "local",
-      declaredPath: maybeLocal.path,
       resolvedPath,
       hidden: maybeLocal.hidden === true,
       description: typeof maybeLocal.description === "string" ? maybeLocal.description : undefined,
-      sourceConfigPath,
-      sourceType,
       referenceBaseDir,
     };
   }
@@ -204,8 +176,6 @@ function normalizeReference(
       branch: typeof maybeGit.branch === "string" ? maybeGit.branch : undefined,
       hidden: maybeGit.hidden === true,
       description: typeof maybeGit.description === "string" ? maybeGit.description : undefined,
-      sourceConfigPath,
-      sourceType,
       referenceBaseDir,
     };
   }
@@ -213,22 +183,19 @@ function normalizeReference(
   return undefined;
 }
 
-function collectConfigPaths(cwd: string, options: LoadReferencesOptions = {}): ConfigPath[] {
+function collectConfigPaths(cwd: string, includeProject: boolean): ConfigPath[] {
   const paths: ConfigPath[] = [];
   const referenceBaseDir = getAgentDir();
 
-  {
-    const globalBaseDir = referenceBaseDir;
-    for (const name of GLOBAL_CONFIG_NAMES) {
-      const path = join(globalBaseDir, name);
-      if (existsSync(path)) {
-        paths.push({ path, sourceType: "global", referenceBaseDir: globalBaseDir });
-      }
+  for (const name of CONFIG_NAMES) {
+    const path = join(referenceBaseDir, name);
+    if (existsSync(path)) {
+      paths.push({ path, sourceType: "global", referenceBaseDir });
     }
   }
 
-  if (options.includeProject !== false) {
-    for (const name of PROJECT_CONFIG_NAMES) {
+  if (includeProject) {
+    for (const name of CONFIG_NAMES) {
       const path = join(cwd, CONFIG_DIR_NAME, name);
       if (existsSync(path)) {
         paths.push({ path, sourceType: "project", referenceBaseDir: cwd });
@@ -241,14 +208,14 @@ function collectConfigPaths(cwd: string, options: LoadReferencesOptions = {}): C
 
 export function loadReferences(
   cwd: string,
-  options: LoadReferencesOptions = {},
+  includeProject = true,
 ): { references: ResolvedReference[]; warnings: string[] } {
   const warnings: string[] = [];
   const merged = new Map<string, ResolvedReference>();
 
-  for (const entry of collectConfigPaths(cwd, options)) {
+  for (const entry of collectConfigPaths(cwd, includeProject)) {
     try {
-      const config = readConfigFile(entry.path);
+      const config = parseReferencesConfigText(readFileSync(entry.path, "utf8"));
       const refs = config.references ?? {};
       for (const [alias, value] of Object.entries(refs)) {
         // A project declaration shadows the global alias even when invalid or
@@ -258,7 +225,7 @@ export function loadReferences(
           merged.delete(alias);
         }
 
-        const normalized = normalizeReference(alias, value, entry.path, entry.sourceType, entry.referenceBaseDir);
+        const normalized = normalizeReference(alias, value, entry.referenceBaseDir);
         if (!normalized) {
           warnings.push(`Invalid reference "${alias}" in ${entry.path}`);
           continue;

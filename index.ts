@@ -2,7 +2,6 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createReferencesAutocompleteProvider } from "./src/autocomplete";
 import { loadReferences } from "./src/config";
 import {
-  assignGitCachePaths,
   materializeGitReference,
   synchronizeAllGitReferences,
 } from "./src/git";
@@ -44,10 +43,6 @@ function buildSystemPromptSection(references: ResolvedReference[]): string {
   return lines.join("\n");
 }
 
-function referencesByAlias(references: ResolvedReference[]): Map<string, ResolvedReference> {
-  return new Map(references.map((reference) => [reference.alias, reference]));
-}
-
 export default function (pi: ExtensionAPI) {
   registerReferenceCommands(pi);
 
@@ -57,9 +52,8 @@ export default function (pi: ExtensionAPI) {
     sessionAbortController = controller;
     const generation = ++sessionGeneration;
 
-    const loaded = loadReferences(ctx.cwd, { includeProject: ctx.isProjectTrusted() });
+    const loaded = loadReferences(ctx.cwd, ctx.isProjectTrusted());
     currentReferences.splice(0, currentReferences.length, ...loaded.references);
-    assignGitCachePaths(currentReferences);
 
     for (const warning of loaded.warnings) {
       ctx.ui.notify(`pi-references: ${warning}`, "error");
@@ -130,7 +124,7 @@ export default function (pi: ExtensionAPI) {
 
     const inputGeneration = sessionGeneration;
     const inputSignal = sessionAbortController?.signal;
-    const byAlias = referencesByAlias(currentReferences);
+    const byAlias = new Map(currentReferences.map((reference) => [reference.alias, reference]));
     const referencesToMaterialize = getReferencedAliases(event.text)
       .map((alias) => byAlias.get(alias))
       .filter((reference): reference is ResolvedReference => Boolean(reference && reference.kind === "git"));
