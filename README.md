@@ -29,8 +29,8 @@ The goal is to bring the behavior described in OpenCode's references documentati
 
 ## Compatibilità
 
-- Pi **0.84.3** (o versioni compatibili dell'Extension API)
-- Node.js **>=22.19.0**, come richiesto da Pi 0.84.3
+- Pi **0.84.x**: da **0.84.0** fino a prima di **0.85.0**
+- Node.js **>=22.19.0**, come richiesto da Pi 0.84.x
 
 L'estensione usa `CONFIG_DIR_NAME` e `getAgentDir()` esportati da Pi. I percorsi
 `.pi` e `~/.pi/agent` riportati sotto sono quindi i valori predefiniti.
