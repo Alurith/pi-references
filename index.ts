@@ -12,7 +12,7 @@ import type { ResolvedReference } from "./src/types";
 let currentReferences: ResolvedReference[] = [];
 let sessionAbortController: AbortController | undefined;
 let sessionGeneration = 0;
-let sessionSyncPromise: Promise<void> | undefined;
+const sessionSyncPromises = new Set<Promise<void>>();
 let autocompleteRegistered = false;
 
 function sanitizeDescription(description: string): string {
@@ -20,6 +20,7 @@ function sanitizeDescription(description: string): string {
 }
 
 const MAX_PROMPT_SECTION_CHARS = 12_000;
+const REFERENCE_SYSTEM_PROMPT_SECTION = "pi-references";
 
 function buildSystemPromptSection(references: ResolvedReference[]): string {
   const described = references.filter((reference) => reference.description && reference.resolvedPath);
@@ -27,7 +28,7 @@ function buildSystemPromptSection(references: ResolvedReference[]): string {
     return "";
   }
 
-  const lines = ["", "Available references:"];
+  const lines = ["Available references:"];
   let currentLength = lines.join("\n").length;
   for (const reference of described) {
     const description = sanitizeDescription(reference.description ?? "");
@@ -44,7 +45,7 @@ function buildSystemPromptSection(references: ResolvedReference[]): string {
 }
 
 export default function (pi: ExtensionAPI) {
-  registerReferenceCommands(pi);
+  registerReferenceCommands(pi, currentReferences);
 
   pi.on("session_start", (_event, ctx) => {
     sessionAbortController?.abort();
@@ -97,20 +98,23 @@ export default function (pi: ExtensionAPI) {
         const message = error instanceof Error ? error.message : String(error);
         ctx.ui.notify(`pi-references: background Git sync failed: ${message}`, "warning");
       });
-    sessionSyncPromise = syncPromise;
+    sessionSyncPromises.add(syncPromise);
+    syncPromise.then(
+      () => sessionSyncPromises.delete(syncPromise),
+      () => sessionSyncPromises.delete(syncPromise),
+    );
   });
 
   pi.on("session_shutdown", async () => {
-    const syncPromise = sessionSyncPromise;
     sessionAbortController?.abort();
     sessionAbortController = undefined;
     sessionGeneration++;
 
-    // Do not let the next session reuse a cache directory while the previous
-    // Git operation is still cleaning it up.
-    await syncPromise;
-    if (sessionSyncPromise === syncPromise) {
-      sessionSyncPromise = undefined;
+    // Do not let the next session reuse a cache directory while any previous
+    // Git operation is still cleaning up. Re-check in case a lifecycle event
+    // queued another sync before shutdown started.
+    while (sessionSyncPromises.size > 0) {
+      await Promise.allSettled([...sessionSyncPromises]);
     }
 
     currentReferences.splice(0, currentReferences.length);
@@ -158,14 +162,24 @@ export default function (pi: ExtensionAPI) {
     return transformed;
   });
 
-  pi.on("before_agent_start", async (event) => {
+  pi.on("before_agent_start", (event) => {
     const section = buildSystemPromptSection(currentReferences);
-    if (!section) {
-      return undefined;
+    const sections = (
+      event.systemPromptOptions as { sections?: Record<string, string> } | undefined
+    )?.sections;
+    if (sections) {
+      if (section) {
+        sections[REFERENCE_SYSTEM_PROMPT_SECTION] = section;
+      } else {
+        delete sections[REFERENCE_SYSTEM_PROMPT_SECTION];
+      }
+      return;
     }
 
-    return {
-      systemPrompt: `${event.systemPrompt}${section}`,
-    };
+    // Pi 0.84–0.85 exposes systemPromptOptions but not structured sections.
+    if (section) {
+      return { systemPrompt: `${event.systemPrompt}\n${section}` };
+    }
+    return undefined;
   });
 }

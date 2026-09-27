@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import extension from "../index";
 import { loadReferences, parseReferencesConfigText, isValidReferenceAlias } from "../src/config";
 import { materializeGitReference } from "../src/git";
 import { resolveInsideRoot } from "../src/resolve";
@@ -61,6 +63,189 @@ describe("reference configuration", () => {
   });
 });
 
+describe("extension integration", () => {
+  it("adds references as a replaceable system-prompt section", async () => {
+    const root = await temporaryDirectory();
+    const referenceRoot = await temporaryDirectory();
+    await mkdir(join(root, CONFIG_DIR_NAME), { recursive: true });
+    await writeFile(
+      join(root, CONFIG_DIR_NAME, "references.json"),
+      JSON.stringify({
+        references: {
+          docs: { path: referenceRoot, description: "Product docs" },
+          sdk: { repository: "owner/sdk", description: "SDK source" },
+        },
+      }),
+    );
+    process.env.PI_CODING_AGENT_DIR = join(root, "agent");
+
+    type Handler = (event: any, ctx: any) => unknown;
+    const handlers = new Map<string, Handler>();
+    const statuses: Array<[string, string | undefined]> = [];
+    let commandOptions: {
+      getArgumentCompletions?: (prefix: string) => unknown;
+      handler?: (args: string, ctx: any) => Promise<void>;
+    } | undefined;
+    const pi = {
+      registerCommand(_name: string, options: typeof commandOptions) {
+        commandOptions = options;
+      },
+      exec: async () => ({ code: 128, stdout: "", stderr: "clone failed" }),
+      on(event: string, handler: Handler) {
+        handlers.set(event, handler);
+        return () => {};
+      },
+    } as unknown as ExtensionAPI;
+    extension(pi);
+
+    assert.ok(commandOptions?.getArgumentCompletions);
+    assert.deepEqual(commandOptions.getArgumentCompletions(""), [
+      { value: "add", label: "add" },
+      { value: "sync", label: "sync" },
+    ]);
+    assert.deepEqual(commandOptions.getArgumentCompletions("add "), [
+      { value: "--global", label: "--global" },
+    ]);
+
+    const sessionStart = handlers.get("session_start");
+    assert.ok(sessionStart);
+    sessionStart(
+      { type: "session_start", reason: "startup" },
+      {
+        cwd: root,
+        isProjectTrusted: () => true,
+        ui: {
+          addAutocompleteProvider() {},
+          notify() {},
+          setStatus(key: string, text: string | undefined) {
+            statuses.push([key, text]);
+          },
+        },
+      },
+    );
+
+    assert.ok(commandOptions?.handler);
+    await commandOptions.handler("sync sdk", {
+      signal: undefined,
+      ui: {
+        setStatus(key: string, text: string | undefined) {
+          statuses.push([key, text]);
+        },
+        notify() {},
+      },
+    });
+    assert.deepEqual(statuses, [
+      ["pi-references", "Syncing sdk…"],
+      ["pi-references", undefined],
+    ]);
+
+    const beforeAgentStart = handlers.get("before_agent_start");
+    assert.ok(beforeAgentStart);
+    const event: { systemPrompt: string; systemPromptOptions: { sections: Record<string, string> } } = {
+      systemPrompt: "base",
+      systemPromptOptions: { sections: {} },
+    };
+    assert.equal(beforeAgentStart(event, {}), undefined);
+    assert.match(event.systemPromptOptions.sections["pi-references"], /Available references:/);
+    assert.match(event.systemPromptOptions.sections["pi-references"], /Product docs/);
+    assert.deepEqual(commandOptions.getArgumentCompletions("sync s"), [
+      { value: "sdk", label: "sdk", description: "SDK source" },
+    ]);
+
+    const legacyEvent = { systemPrompt: "base", systemPromptOptions: {} } as any;
+    const legacyResult = beforeAgentStart(legacyEvent, {}) as { systemPrompt?: string } | undefined;
+    assert.match(legacyResult?.systemPrompt ?? "", /^base\nAvailable references:/);
+
+    const sessionShutdown = handlers.get("session_shutdown");
+    assert.ok(sessionShutdown);
+    await sessionShutdown({}, {});
+  });
+
+  it("waits for previous session synchronizations before shutdown", async () => {
+    const firstRoot = await temporaryDirectory();
+    const secondRoot = await temporaryDirectory();
+    const agentRoot = await temporaryDirectory();
+    await mkdir(join(firstRoot, CONFIG_DIR_NAME), { recursive: true });
+    await mkdir(join(secondRoot, CONFIG_DIR_NAME), { recursive: true });
+    await writeFile(
+      join(firstRoot, CONFIG_DIR_NAME, "references.json"),
+      JSON.stringify({ references: { first: "owner/first" } }),
+    );
+    await writeFile(
+      join(secondRoot, CONFIG_DIR_NAME, "references.json"),
+      JSON.stringify({ references: { second: "owner/second" } }),
+    );
+    process.env.PI_CODING_AGENT_DIR = agentRoot;
+
+    type Handler = (event: any, ctx: any) => unknown;
+    const handlers = new Map<string, Handler>();
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    let markFirstStarted!: () => void;
+    let markSecondStarted!: () => void;
+    const firstStarted = new Promise<void>((resolve) => {
+      markFirstStarted = resolve;
+    });
+    const secondStarted = new Promise<void>((resolve) => {
+      markSecondStarted = resolve;
+    });
+    const pi = {
+      registerCommand() {},
+      on(event: string, handler: Handler) {
+        handlers.set(event, handler);
+        return () => {};
+      },
+      exec: async (_command: string, args: string[]) => {
+        const repository = args.at(-2) ?? "";
+        if (repository.includes("/first.git")) {
+          markFirstStarted();
+          await new Promise<void>((resolve) => {
+            releaseFirst = resolve;
+          });
+          return { code: 128, stdout: "", stderr: "first failed" };
+        }
+        if (repository.includes("/second.git")) {
+          markSecondStarted();
+          await new Promise<void>((resolve) => {
+            releaseSecond = resolve;
+          });
+          return { code: 128, stdout: "", stderr: "second failed" };
+        }
+        return { code: 1, stdout: "", stderr: "unknown repository" };
+      },
+    } as unknown as ExtensionAPI;
+    extension(pi);
+
+    const sessionStart = handlers.get("session_start");
+    const sessionShutdown = handlers.get("session_shutdown");
+    assert.ok(sessionStart);
+    assert.ok(sessionShutdown);
+    const sessionContext = (cwd: string) => ({
+      cwd,
+      isProjectTrusted: () => true,
+      ui: { addAutocompleteProvider() {}, notify() {} },
+    });
+
+    sessionStart({ type: "session_start", reason: "startup" }, sessionContext(firstRoot));
+    await firstStarted;
+    sessionStart({ type: "session_start", reason: "new" }, sessionContext(secondRoot));
+    await secondStarted;
+
+    let shutdownFinished = false;
+    const shutdownPromise = sessionShutdown({}, {}) as Promise<void>;
+    shutdownPromise.then(() => {
+      shutdownFinished = true;
+    });
+    releaseSecond();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(shutdownFinished, false);
+
+    releaseFirst();
+    await shutdownPromise;
+    assert.equal(shutdownFinished, true);
+  });
+});
+
 describe("reference tokenization and path safety", () => {
   it("keeps dots in aliases and handles path punctuation", () => {
     const aliasToken = findReferenceTokens("@docs.v2.")[0];
@@ -115,14 +300,15 @@ describe("Git materialization", () => {
     assert.equal(calls[0]?.includes("--"), true);
   });
 
-  it("keeps an aborted Git operation exclusive until it settles", async () => {
+  it("retries a shared Git operation after the first caller is aborted", async () => {
     const root = await temporaryDirectory();
     process.env.PI_CODING_AGENT_DIR = root;
-    let releaseClone!: () => void;
-    let markCloneStarted!: () => void;
-    const cloneStarted = new Promise<void>((resolve) => {
-      markCloneStarted = resolve;
+    let releaseFirstClone!: () => void;
+    let markFirstCloneStarted!: () => void;
+    const firstCloneStarted = new Promise<void>((resolve) => {
+      markFirstCloneStarted = resolve;
     });
+    let cloneCount = 0;
     const calls: string[][] = [];
     const pi = {
       exec: async (_command: string, args: string[]) => {
@@ -130,11 +316,18 @@ describe("Git materialization", () => {
         if (args[0] !== "clone") {
           return { code: 1, stdout: "", stderr: "" };
         }
-        markCloneStarted();
-        await new Promise<void>((resolve) => {
-          releaseClone = resolve;
-        });
-        return { code: 128, stdout: "", stderr: "clone failed" };
+        cloneCount++;
+        if (cloneCount === 1) {
+          markFirstCloneStarted();
+          await new Promise<void>((resolve) => {
+            releaseFirstClone = resolve;
+          });
+          return { code: 128, stdout: "", stderr: "clone failed" };
+        }
+        const tempDir = args.at(-1);
+        assert.ok(tempDir);
+        await mkdir(join(tempDir, ".git"), { recursive: true });
+        return { code: 0, stdout: "", stderr: "" };
       },
     } as never;
     const first: ResolvedReference = {
@@ -147,12 +340,16 @@ describe("Git materialization", () => {
     const controller = new AbortController();
 
     const firstOperation = materializeGitReference(pi, first, { signal: controller.signal });
-    await cloneStarted;
+    await firstCloneStarted;
     controller.abort();
     const secondOperation = materializeGitReference(pi, second);
 
     assert.equal(calls.filter((args) => args[0] === "clone").length, 1);
-    releaseClone();
-    await Promise.all([firstOperation, secondOperation]);
+    releaseFirstClone();
+    const [firstWarning, secondWarning] = await Promise.all([firstOperation, secondOperation]);
+    assert.equal(firstWarning, "clone failed");
+    assert.equal(secondWarning, undefined);
+    assert.equal(cloneCount, 2);
+    assert.ok(second.resolvedPath);
   });
 });

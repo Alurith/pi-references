@@ -29,6 +29,7 @@ export type GitSyncResult = {
 
 type InFlightOperation = {
   promise: Promise<GitOperationResult>;
+  signal?: AbortSignal;
 };
 
 const inFlightOperations = new Map<string, InFlightOperation>();
@@ -144,12 +145,18 @@ function applyOperationResult(
 function runExclusiveGitOperation(
   targetDir: string,
   operation: () => Promise<GitOperationResult>,
+  signal?: AbortSignal,
 ): Promise<GitOperationResult> {
   const existing = inFlightOperations.get(targetDir);
   if (existing) {
-    // Keep the slot until the operation settles; replacing an aborted operation
-    // early could let two clones mutate the same cache directory concurrently.
-    return existing.promise;
+    // Keep the slot until the operation settles. If its caller was aborted,
+    // retry afterward instead of passing that cancellation to the next caller.
+    return existing.promise.then((result) => {
+      if (result.action === "failed" && existing.signal?.aborted && !signal?.aborted) {
+        return runExclusiveGitOperation(targetDir, operation, signal);
+      }
+      return result;
+    });
   }
 
   const promise = operation()
@@ -160,7 +167,7 @@ function runExclusiveGitOperation(
       }
     });
 
-  inFlightOperations.set(targetDir, { promise });
+  inFlightOperations.set(targetDir, { promise, signal });
   return promise;
 }
 
@@ -313,7 +320,7 @@ export async function materializeGitReference(
     }
 
     return cloneReference(pi, reference, targetDir, options);
-  });
+  }, options.signal);
 
   applyOperationResult(reference, targetDir, result);
   return result.warning;
@@ -336,7 +343,7 @@ export async function synchronizeGitReference(
     }
 
     return cloneReference(pi, reference, targetDir, options);
-  });
+  }, options.signal);
 
   applyOperationResult(reference, targetDir, result);
   return {

@@ -22,18 +22,19 @@ The goal is to bring the behavior described in OpenCode's references documentati
 - JSON and JSONC config files
 - `description` support: described references are injected into the agent context
 - `hidden` support: hidden references do not appear in autocomplete but can still be used manually
-- Autocomplete for reference aliases
+- Autocomplete for reference aliases and `/references` arguments
 - File browsing autocomplete inside reference directories
 - Input expansion to resolved filesystem paths
 - Git repository cache under Pi's agent directory (`~/.pi/agent/cache/references/` by default)
+- Manual Git synchronization with `/references sync [alias]`
 
-## Compatibilità
+## Compatibility
 
-- Pi **0.87.x–0.89.x**: da **0.87.0** fino a prima di **0.90.0**
-- Node.js **>=22.19.0**, come richiesto da Pi 0.87.x
+- Pi **0.84.x–0.89.x**: from **0.84.0** up to, but not including, **0.90.0**
+- Node.js **>=22.19.0**, as required by Pi 0.84.x
 
-L'estensione usa `CONFIG_DIR_NAME` e `getAgentDir()` esportati da Pi. I percorsi
-`.pi` e `~/.pi/agent` riportati sotto sono quindi i valori predefiniti.
+The extension uses Pi's exported `CONFIG_DIR_NAME` and `getAgentDir()`. The
+`.pi` and `~/.pi/agent` paths described below are therefore the default values.
 
 ## Installation
 
@@ -144,7 +145,7 @@ To make Pi load the extension, use `pi install ...`, or load it explicitly with 
 .pi/references.jsonc
 ```
 
-(`.pi` è la project config directory predefinita di Pi.)
+(`.pi` is Pi's default project config directory.)
 
 Relative paths in project config are resolved from the project root.
 
@@ -155,8 +156,8 @@ Relative paths in project config are resolved from the project root.
 ~/.pi/agent/references.jsonc
 ```
 
-(`~/.pi/agent` è l'agent directory predefinita di Pi; può essere modificata
-tramite `PI_CODING_AGENT_DIR`.)
+(`~/.pi/agent` is Pi's default agent directory and can be changed via
+`PI_CODING_AGENT_DIR`.)
 
 Relative paths in global config are resolved from `~/.pi/agent`.
 
@@ -208,7 +209,7 @@ Git repositories are cloned into:
 ~/.pi/agent/cache/references/
 ```
 
-Il percorso effettivo segue l'agent directory restituita da Pi.
+The effective path follows the agent directory returned by Pi.
 
 Git repositories are materialized in the background when the session starts. Missing repositories are cloned with depth 1 and only the selected branch; existing cached checkouts are refreshed shallowly. Startup does not wait for Git, but using a reference while its operation is still running waits for that reference to become available.
 
@@ -263,6 +264,15 @@ Use `--global` to write the global configuration instead:
 ```
 
 The command writes `.pi/references.json`/`.jsonc` (or the global equivalent) and tells you to run `/reload`. It does not reload the extension automatically.
+
+To retry Git synchronization manually:
+
+```text
+/references sync
+/references sync sdk
+```
+
+The command shows progress in Pi's status bar and clears it when the operation finishes.
 
 ## Usage
 
@@ -329,10 +339,10 @@ Implemented:
 - realpath-based symlink boundary protection
 - cancellable Git work on session shutdown
 - shared tokenizer for autocomplete and input expansion
+- `/references` argument autocomplete
+- manual Git synchronization with status-bar progress
 
 Not implemented yet:
-
-- explicit manual Git sync command
 - persistent file index/cache
 - recursive parent-directory config discovery
 - permission boundary changes
