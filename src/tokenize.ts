@@ -14,8 +14,8 @@ export type ReferenceToken = {
   end: number;
 };
 
-const TOKEN_BOUNDARY_RE = /(^|[\s([{'"])@([A-Za-z0-9][A-Za-z0-9._-]*)(\/[^\s`]*)?/g;
-const CURSOR_BOUNDARY_RE = /(^|[\s([{'"])@([A-Za-z0-9._-]*)(\/[^\s`]*)?$/;
+const TOKEN_BOUNDARY_RE = /(^|[\s([{'"<`，．：；！？（）［］｛｝“”‘’…—])@([A-Za-z0-9][A-Za-z0-9._-]*)(\/[^\s`]*)?/g;
+const CURSOR_BOUNDARY_RE = /(^|[\s([{'"<`，．：；！？（）［］｛｝“”‘’…—])@([A-Za-z0-9._-]*)(\/[^\s`]*)?$/;
 const TRAILING_PUNCTUATION_RE = /[.,;:!?)]*$/;
 
 function splitTrailing(full: string, alias: string, rawPath: string | undefined): ReferenceToken {

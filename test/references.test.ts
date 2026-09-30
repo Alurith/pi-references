@@ -262,6 +262,14 @@ describe("reference tokenization and path safety", () => {
       pathQuery: "src/",
       prefix: "@docs/src/",
     });
+
+    assert.equal(findReferenceTokens("(<@docs/src>")[0]?.alias, "docs");
+    assert.equal(findReferenceTokens("`@docs/src`")[0]?.rawPath, "/src");
+    assert.deepEqual(parseReferenceQueryAtCursor("look at ，@docs/src/"), {
+      aliasQuery: "docs",
+      pathQuery: "src/",
+      prefix: "@docs/src/",
+    });
   });
 
   it("rejects lexical traversal and symlink escapes", async () => {

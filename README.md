@@ -30,8 +30,8 @@ The goal is to bring the behavior described in OpenCode's references documentati
 
 ## Compatibility
 
-- Pi **0.84.x–0.89.x**: from **0.84.0** up to, but not including, **0.90.0**
-- Node.js **>=22.19.0**, as required by Pi 0.84.x
+- Pi **0.84.x–0.99.x**: from **0.84.0** up to, but not including, **1.0.0**; verified with **0.99.1**
+- Node.js **>=22.19.0**, as required by Pi
 
 The extension uses Pi's exported `CONFIG_DIR_NAME` and `getAgentDir()`. The
 `.pi` and `~/.pi/agent` paths described below are therefore the default values.
