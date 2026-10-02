@@ -7,9 +7,9 @@ import {
   addReferenceToConfig,
   type AddReferenceRequest,
   type ReferenceScope,
-} from "./config-write";
-import { synchronizeAllGitReferences } from "./git";
-import type { ResolvedReference } from "./types";
+} from "./config-write.ts";
+import { synchronizeAllGitReferences } from "./git.ts";
+import type { ResolvedReference } from "./types.ts";
 
 const STATUS_KEY = "pi-references";
 const ADD_USAGE = "Usage: /references add [--global] <alias> <path-or-repository> [branch]";
@@ -206,10 +206,6 @@ async function promptAddReference(
   };
 }
 
-function setReferenceStatus(ctx: ExtensionCommandContext, text: string | undefined): void {
-  ctx.ui.setStatus?.(STATUS_KEY, text);
-}
-
 async function handleSyncCommand(
   alias: string | undefined,
   ctx: ExtensionCommandContext,
@@ -235,7 +231,7 @@ async function handleSyncCommand(
     return;
   }
 
-  setReferenceStatus(ctx, `Syncing ${alias ?? "Git references"}…`);
+  ctx.ui.setStatus?.(STATUS_KEY, `Syncing ${alias ?? "Git references"}…`);
   try {
     const results = await synchronizeAllGitReferences(pi, selected, { signal: ctx.signal });
     const failures = results.filter((result) => result.action === "failed");
@@ -248,7 +244,7 @@ async function handleSyncCommand(
     }
     ctx.ui.notify(`Synchronized ${results.length} Git reference${results.length === 1 ? "" : "s"}`, "info");
   } finally {
-    setReferenceStatus(ctx, undefined);
+    ctx.ui.setStatus?.(STATUS_KEY, undefined);
   }
 }
 
@@ -276,9 +272,9 @@ async function handleReferencesCommand(
   }
 
   try {
-    const result = await addReferenceToConfig(ctx.cwd, request);
+    const configPath = await addReferenceToConfig(ctx.cwd, request);
     ctx.ui.notify(
-      `Reference "${request.alias}" saved in ${result.configPath}. Run /reload to apply it.`,
+      `Reference "${request.alias}" saved in ${configPath}. Run /reload to apply it.`,
       "info",
     );
   } catch (error: unknown) {

@@ -1,9 +1,9 @@
 import { type Dirent } from "node:fs";
 import { readdir } from "node:fs/promises";
 import type { AutocompleteItem, AutocompleteProvider, AutocompleteSuggestions } from "@earendil-works/pi-tui";
-import { resolveInsideRoot } from "./resolve";
-import { parseReferenceQueryAtCursor } from "./tokenize";
-import type { ResolvedReference } from "./types";
+import { resolveInsideRoot } from "./resolve.ts";
+import { parseReferenceQueryAtCursor } from "./tokenize.ts";
+import type { ResolvedReference } from "./types.ts";
 
 const MAX_SUGGESTIONS = 50;
 const DIRECTORY_CACHE_TTL_MS = 500;

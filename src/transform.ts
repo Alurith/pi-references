@@ -1,6 +1,6 @@
-import type { ResolvedReference } from "./types";
-import { resolveInsideRoot } from "./resolve";
-import { findReferenceTokens } from "./tokenize";
+import type { ResolvedReference } from "./types.ts";
+import { resolveInsideRoot } from "./resolve.ts";
+import { findReferenceTokens } from "./tokenize.ts";
 
 function resolveTokenPath(reference: ResolvedReference, rawPath: string | undefined): string | undefined {
   if (!reference.resolvedPath) {

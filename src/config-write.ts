@@ -7,9 +7,9 @@ import {
   classifyReferenceSource,
   isValidReferenceAlias,
   parseReferencesConfigText,
-} from "./config";
-import { resolveReferencePath } from "./resolve";
-import type { ReferenceConfigValue } from "./types";
+} from "./config.ts";
+import { resolveReferencePath } from "./resolve.ts";
+import type { ReferenceConfigValue } from "./types.ts";
 
 export type ReferenceScope = "project" | "global";
 
@@ -18,10 +18,6 @@ export type AddReferenceRequest = {
   source: string;
   branch?: string;
   scope: ReferenceScope;
-};
-
-export type AddReferenceResult = {
-  configPath: string;
 };
 
 type ConfigTarget = {
@@ -80,7 +76,7 @@ async function writeFileAtomically(path: string, content: string): Promise<void>
 export async function addReferenceToConfig(
   cwd: string,
   request: AddReferenceRequest,
-): Promise<AddReferenceResult> {
+): Promise<string> {
   if (!isValidReferenceAlias(request.alias)) {
     throw new Error(`Invalid reference alias "${request.alias}"`);
   }
@@ -108,23 +104,12 @@ export async function addReferenceToConfig(
 
   const value = classified.value;
   const rawConfig = target.exists ? await readFile(target.path, "utf8") : "{}\n";
-  const parsed = parseReferencesConfigText(rawConfig);
-  const references = parsed.references;
-
-  if (references !== undefined) {
-    if (!references || typeof references !== "object" || Array.isArray(references)) {
-      throw new Error('The "references" property must be an object');
-    }
-
-    if (Object.prototype.hasOwnProperty.call(references, request.alias)) {
-      throw new Error(`Reference alias "${request.alias}" already exists`);
-    }
+  const references = parseReferencesConfigText(rawConfig).references ?? {};
+  if (Object.hasOwn(references, request.alias)) {
+    throw new Error(`Reference alias "${request.alias}" already exists`);
   }
 
   const nextConfig = updateConfig(rawConfig, request.alias, value);
   await writeFileAtomically(target.path, nextConfig);
-
-  return {
-    configPath: target.path,
-  };
+  return target.path;
 }

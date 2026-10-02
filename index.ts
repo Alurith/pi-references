@@ -1,13 +1,13 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { createReferencesAutocompleteProvider } from "./src/autocomplete";
-import { loadReferences } from "./src/config";
+import { createReferencesAutocompleteProvider } from "./src/autocomplete.ts";
+import { loadReferences } from "./src/config.ts";
 import {
   materializeGitReference,
   synchronizeAllGitReferences,
-} from "./src/git";
-import { registerReferenceCommands } from "./src/commands";
-import { expandReferencesInText, getReferencedAliases } from "./src/transform";
-import type { ResolvedReference } from "./src/types";
+} from "./src/git.ts";
+import { registerReferenceCommands } from "./src/commands.ts";
+import { expandReferencesInText, getReferencedAliases } from "./src/transform.ts";
+import type { ResolvedReference } from "./src/types.ts";
 
 let currentReferences: ResolvedReference[] = [];
 let sessionAbortController: AbortController | undefined;

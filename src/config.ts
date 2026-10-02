@@ -8,8 +8,8 @@ import type {
   ReferencesConfigFile,
   ReferenceSourceType,
   ResolvedReference,
-} from "./types";
-import { resolveReferencePath } from "./resolve";
+} from "./types.ts";
+import { resolveReferencePath } from "./resolve.ts";
 
 const ALIAS_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const BRANCH_RE = /^[^\s\0-][^\s\0]*$/;
@@ -121,29 +121,7 @@ function normalizeReference(
     if (!value.trim()) {
       return undefined;
     }
-
-    const classified = classifyReferenceSource(value, referenceBaseDir);
-    if (!classified) {
-      return undefined;
-    }
-
-    if (classified.kind === "local") {
-      return {
-        alias,
-        kind: "local",
-        resolvedPath: resolveReferencePath(referenceBaseDir, value),
-        hidden: false,
-        referenceBaseDir,
-      };
-    }
-
-    return {
-      alias,
-      kind: "git",
-      repository: value,
-      hidden: false,
-      referenceBaseDir,
-    };
+    value = classifyReferenceSource(value, referenceBaseDir)?.value;
   }
 
   if (!value || typeof value !== "object" || Array.isArray(value)) {

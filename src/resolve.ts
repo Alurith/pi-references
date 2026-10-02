@@ -13,11 +13,7 @@ export function expandHome(input: string): string {
 }
 
 export function resolveReferencePath(baseDir: string, declaredPath: string): string {
-  const expanded = expandHome(declaredPath);
-  if (isAbsolute(expanded)) {
-    return resolve(expanded);
-  }
-  return resolve(baseDir, expanded);
+  return resolve(baseDir, expandHome(declaredPath));
 }
 
 function isInside(root: string, target: string): boolean {

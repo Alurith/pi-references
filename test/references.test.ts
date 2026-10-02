@@ -1,17 +1,19 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, it } from "node:test";
-import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME, discoverAndLoadExtensions } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import extension from "../index";
-import { loadReferences, parseReferencesConfigText, isValidReferenceAlias } from "../src/config";
-import { materializeGitReference } from "../src/git";
-import { resolveInsideRoot } from "../src/resolve";
-import { expandReferencesInText } from "../src/transform";
-import { findReferenceTokens, parseReferenceQueryAtCursor } from "../src/tokenize";
-import type { ResolvedReference } from "../src/types";
+import extension from "../index.ts";
+import { loadReferences, parseReferencesConfigText, isValidReferenceAlias } from "../src/config.ts";
+import { addReferenceToConfig } from "../src/config-write.ts";
+import { materializeGitReference } from "../src/git.ts";
+import { resolveInsideRoot, resolveReferencePath } from "../src/resolve.ts";
+import { expandReferencesInText } from "../src/transform.ts";
+import { findReferenceTokens, parseReferenceQueryAtCursor } from "../src/tokenize.ts";
+import type { ResolvedReference } from "../src/types.ts";
 
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 const temporaryDirectories: string[] = [];
@@ -32,6 +34,12 @@ async function temporaryDirectory(): Promise<string> {
 describe("reference configuration", () => {
   it("rejects malformed roots and supports JSONC", () => {
     assert.throws(() => parseReferencesConfigText("[]"), /valid JSON object/);
+    for (const value of ["null", "[]", "\"scalar\""]) {
+      assert.throws(
+        () => parseReferencesConfigText(`{"references": ${value}}`),
+        /The "references" property must be an object/,
+      );
+    }
     const parsed = parseReferencesConfigText(`{
       // comment
       "references": { "docs": "./docs", },
@@ -39,19 +47,109 @@ describe("reference configuration", () => {
     assert.deepEqual(parsed.references, { docs: "./docs" });
   });
 
+  it("normalizes shorthand and object references consistently", async () => {
+    const root = await temporaryDirectory();
+    const agentDir = join(root, "agent");
+    const project = join(root, "project");
+    const localDocs = join(project, "local-docs");
+    const objectDocs = join(project, "object-docs");
+    const existingRepositoryPath = join(project, "owner", "docs");
+    await mkdir(agentDir, { recursive: true });
+    await mkdir(join(project, CONFIG_DIR_NAME), { recursive: true });
+    await mkdir(localDocs, { recursive: true });
+    await mkdir(objectDocs, { recursive: true });
+    await mkdir(existingRepositoryPath, { recursive: true });
+    await writeFile(
+      join(project, CONFIG_DIR_NAME, "references.json"),
+      JSON.stringify({
+        references: {
+          shorthandLocal: "./local-docs",
+          shorthandGit: "owner/repo",
+          existingRepository: "owner/docs",
+          objectLocal: { path: "./object-docs", hidden: true, description: "Object docs" },
+          objectGit: { repository: "owner/sdk", branch: "main", hidden: true, description: "SDK" },
+          empty: "   ",
+          ambiguous: { path: "./object-docs", repository: "owner/ambiguous" },
+        },
+      }),
+    );
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+
+    const loaded = loadReferences(project);
+    const byAlias = new Map(loaded.references.map((reference) => [reference.alias, reference]));
+
+    assert.equal(byAlias.get("shorthandLocal")?.resolvedPath, localDocs);
+    assert.equal(byAlias.get("shorthandLocal")?.hidden, false);
+    assert.equal(byAlias.get("shorthandGit")?.repository, "owner/repo");
+    assert.equal(byAlias.get("existingRepository")?.resolvedPath, existingRepositoryPath);
+    assert.equal(byAlias.get("objectLocal")?.resolvedPath, objectDocs);
+    assert.equal(byAlias.get("objectLocal")?.hidden, true);
+    assert.equal(byAlias.get("objectLocal")?.description, "Object docs");
+    assert.equal(byAlias.get("objectGit")?.repository, "owner/sdk");
+    assert.equal(byAlias.get("objectGit")?.branch, "main");
+    assert.equal(byAlias.get("objectGit")?.hidden, true);
+    assert.equal(byAlias.get("objectGit")?.description, "SDK");
+    assert.equal(byAlias.has("empty"), false);
+    assert.equal(byAlias.has("ambiguous"), false);
+    assert.match(loaded.warnings.join("\n"), /empty/);
+    assert.match(loaded.warnings.join("\n"), /ambiguous/);
+  });
+
   it("lets an invalid project alias shadow the global alias", async () => {
     const root = await temporaryDirectory();
     const agentDir = join(root, "agent");
     const project = join(root, "project");
-    await mkdir(join(agentDir), { recursive: true });
+    const globalDocs = join(root, "global-docs");
+    await mkdir(agentDir, { recursive: true });
+    await mkdir(globalDocs, { recursive: true });
     await mkdir(join(project, CONFIG_DIR_NAME), { recursive: true });
     await writeFile(join(agentDir, "references.json"), JSON.stringify({ references: { docs: "../global-docs" } }));
     await writeFile(join(project, CONFIG_DIR_NAME, "references.json"), JSON.stringify({ references: { docs: "./missing" } }));
     process.env.PI_CODING_AGENT_DIR = agentDir;
 
-    const loaded = loadReferences(project);
-    assert.equal(loaded.references.some((reference) => reference.alias === "docs"), false);
-    assert.match(loaded.warnings.join("\n"), /docs/);
+    const untrusted = loadReferences(project, false);
+    assert.equal(untrusted.references.find((reference) => reference.alias === "docs")?.resolvedPath, globalDocs);
+
+    const trusted = loadReferences(project, true);
+    assert.equal(trusted.references.some((reference) => reference.alias === "docs"), false);
+    assert.match(trusted.warnings.join("\n"), /docs/);
+  });
+
+  it("validates references before writing and preserves the config on failure", async () => {
+    const root = await temporaryDirectory();
+    const project = join(root, "project");
+    const docs = join(project, "docs");
+    const configPath = join(project, CONFIG_DIR_NAME, "references.jsonc");
+    await mkdir(docs, { recursive: true });
+    await mkdir(join(project, CONFIG_DIR_NAME), { recursive: true });
+
+    const request = { alias: "new", source: "./docs", scope: "project" as const };
+    for (const raw of [
+      '{"references": null}\n',
+      '{"references": []}\n',
+      '{"references": "scalar"}\n',
+    ]) {
+      await writeFile(configPath, raw);
+      await assert.rejects(() => addReferenceToConfig(project, request), /references/);
+      assert.equal(await readFile(configPath, "utf8"), raw);
+    }
+
+    const duplicateRaw = '{"references":{"docs":null}}\n';
+    await writeFile(configPath, duplicateRaw);
+    await assert.rejects(
+      () => addReferenceToConfig(project, { ...request, alias: "docs" }),
+      /already exists/,
+    );
+    assert.equal(await readFile(configPath, "utf8"), duplicateRaw);
+
+    const raw = '{\r\n  // preserve this comment\r\n  "references": {}\r\n}\r\n';
+    await writeFile(configPath, raw);
+    const savedPath = await addReferenceToConfig(project, { ...request, alias: "toString" });
+    assert.equal(savedPath, configPath);
+    const saved = await readFile(configPath, "utf8");
+    assert.match(saved, /preserve this comment/);
+    assert.match(saved, /"toString"/);
+    assert.match(saved, /\r\n/);
   });
 
   it("accepts only aliases that tokenizer can represent", () => {
@@ -64,6 +162,21 @@ describe("reference configuration", () => {
 });
 
 describe("extension integration", () => {
+  it("loads through Pi's extension discovery loader", async () => {
+    const root = await temporaryDirectory();
+    const agentDir = join(root, "agent");
+    await mkdir(agentDir, { recursive: true });
+
+    const { extensions, errors } = await discoverAndLoadExtensions(
+      [fileURLToPath(new URL("../index.ts", import.meta.url))],
+      root,
+      agentDir,
+    );
+    assert.deepEqual(errors, []);
+    assert.equal(extensions.length, 1);
+    assert.ok(extensions[0]?.commands.has("references"));
+  });
+
   it("adds references as a replaceable system-prompt section", async () => {
     const root = await temporaryDirectory();
     const referenceRoot = await temporaryDirectory();
@@ -138,6 +251,10 @@ describe("extension integration", () => {
       ["pi-references", "Syncing sdk…"],
       ["pi-references", undefined],
     ]);
+    await commandOptions.handler("sync sdk", {
+      signal: undefined,
+      ui: { notify() {} },
+    });
 
     const beforeAgentStart = handlers.get("before_agent_start");
     assert.ok(beforeAgentStart);
@@ -256,6 +373,14 @@ describe("reference tokenization and path safety", () => {
     assert.equal(pathToken?.alias, "docs");
     assert.equal(pathToken?.rawPath, "/file.ts");
     assert.equal(pathToken?.trailing, ",");
+    assert.deepEqual(findReferenceTokens("(@docs/file.ts,)")[0], {
+      alias: "docs",
+      rawPath: "/file.ts",
+      token: "@docs/file.ts",
+      trailing: ",)",
+      start: 1,
+      end: 16,
+    });
 
     assert.deepEqual(parseReferenceQueryAtCursor("look at @docs/src/"), {
       aliasQuery: "docs",
@@ -270,6 +395,30 @@ describe("reference tokenization and path safety", () => {
       pathQuery: "src/",
       prefix: "@docs/src/",
     });
+  });
+
+  it("expands multiple references without shifting later offsets", async () => {
+    const root = await temporaryDirectory();
+    const docs = join(root, "docs");
+    const sdk = join(root, "sdk");
+    await mkdir(docs, { recursive: true });
+    await mkdir(sdk, { recursive: true });
+
+    const references: ResolvedReference[] = [
+      { alias: "docs", kind: "local", resolvedPath: docs, hidden: false },
+      { alias: "sdk", kind: "local", resolvedPath: sdk, hidden: false },
+    ];
+    assert.equal(
+      expandReferencesInText("See @docs/file.ts and @sdk/index.ts.", references),
+      `See @docs/file.ts [resolved: ${join(docs, "file.ts")}] and @sdk/index.ts [resolved: ${join(sdk, "index.ts")}].`,
+    );
+  });
+
+  it("resolves relative, absolute, and home paths", () => {
+    assert.equal(resolveReferencePath("/base", "docs"), join("/base", "docs"));
+    assert.equal(resolveReferencePath("/base", "/tmp/docs"), "/tmp/docs");
+    assert.equal(resolveReferencePath("/base", "~"), homedir());
+    assert.equal(resolveReferencePath("/base", "~/docs"), join(homedir(), "docs"));
   });
 
   it("rejects lexical traversal and symlink escapes", async () => {

@@ -3,9 +3,9 @@ import { mkdir, rename, rm } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { isAbsolute, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { resolveReferencePath } from "./resolve";
+import { resolveReferencePath } from "./resolve.ts";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { ResolvedReference } from "./types";
+import type { ResolvedReference } from "./types.ts";
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_CONCURRENT_SYNCS = 4;
