@@ -265,6 +265,24 @@ describe("extension integration", () => {
     assert.equal(beforeAgentStart(event, {}), undefined);
     assert.match(event.systemPromptOptions.sections["pi-references"], /Available references:/);
     assert.match(event.systemPromptOptions.sections["pi-references"], /Product docs/);
+
+    const customEvent = {
+      type: "before_agent_start",
+      messageType: "custom",
+      message: {
+        role: "custom",
+        customType: "test",
+        content: "custom run",
+        display: false,
+        timestamp: 0,
+      },
+      systemPrompt: "base",
+      systemPromptOptions: { sections: {} },
+    } as any;
+    assert.equal(beforeAgentStart(customEvent, {}), undefined);
+    assert.match(customEvent.systemPromptOptions.sections["pi-references"], /Available references:/);
+    assert.match(customEvent.systemPromptOptions.sections["pi-references"], /Product docs/);
+
     assert.deepEqual(commandOptions.getArgumentCompletions("sync s"), [
       { value: "sdk", label: "sdk", description: "SDK source" },
     ]);
