@@ -330,38 +330,6 @@ Reference aliases:
 - may contain only ASCII letters, digits, `.`, `_`, and `-`
 - cannot contain `/`, backslashes, whitespace, or punctuation such as `!`
 
-## Current status
-
-Implemented:
-
-- local references
-- Git references
-- global + project config
-- project config loaded only when Pi trusts the project
-- JSON + JSONC comments/trailing commas
-- `description`
-- `hidden`
-- additive alias autocomplete that keeps Pi's native `@` file completion
-- file autocomplete inside references with path escape protection
-- background Git materialization and shallow refresh at session start
-- depth-1, single-branch Git clone
-- atomic Git clone into cache without deleting existing checkouts
-- cross-process Git and configuration locks
-- non-forcing refresh that preserves conflicting tracked, untracked, and ignored files
-- quoted file and directory autocomplete
-- cache checkout origin validation before reuse
-- input expansion to `[resolved: /real/path]` only for available paths
-- realpath-based symlink boundary protection
-- cancellable Git work on session shutdown
-- shared tokenizer for autocomplete and input expansion
-- `/references` argument autocomplete
-- manual Git synchronization with status-bar progress
-
-Not implemented yet:
-- persistent file index/cache
-- recursive parent-directory config discovery
-- permission boundary changes
-
 ## Development
 
 This package is a Pi extension package. The package manifest declares:
@@ -375,10 +343,6 @@ This package is a Pi extension package. The package manifest declares:
 ```
 
 So Pi can install and load it directly with `pi install`.
-
-### Legacy compatibility testing
-
-When testing Pi 1.1.0 from npm, keep its `@earendil-works/pi-codemode` dependency at 1.1.0. A fresh install can otherwise select 1.2.0 and fail while importing Pi itself (`MCP_TYPESCRIPT_PREAMBLE` missing), before this extension runs. The compatibility matrix passes with that dependency aligned; no legacy dependency override is added to this extension.
 
 ## License
 
