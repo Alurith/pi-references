@@ -272,7 +272,7 @@ async function handleReferencesCommand(
   }
 
   try {
-    const configPath = await addReferenceToConfig(ctx.cwd, request);
+    const configPath = await addReferenceToConfig(ctx.cwd, request, ctx.signal);
     ctx.ui.notify(
       `Reference "${request.alias}" saved in ${configPath}. Run /reload to apply it.`,
       "info",

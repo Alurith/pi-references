@@ -1,5 +1,5 @@
 import { existsSync, statSync } from "node:fs";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { applyEdits, modify } from "jsonc-parser";
@@ -9,6 +9,7 @@ import {
   parseReferencesConfigText,
 } from "./config.ts";
 import { resolveReferencePath } from "./resolve.ts";
+import { withFileLock } from "./file-lock.ts";
 import type { ReferenceConfigValue } from "./types.ts";
 
 export type ReferenceScope = "project" | "global";
@@ -60,56 +61,57 @@ function updateConfig(
   return applyEdits(rawConfig, edits);
 }
 
-async function writeFileAtomically(path: string, content: string): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
-
-  const tempPath = `${path}.tmp-${process.pid}-${Date.now()}`;
+async function writeFileAtomically(path: string, content: string, signal: AbortSignal): Promise<void> {
+  const tempDir = await mkdtemp(join(dirname(path), ".references-write-"));
+  const tempPath = join(tempDir, "config");
   try {
     await writeFile(tempPath, content, "utf8");
+    signal.throwIfAborted();
     await rename(tempPath, path);
-  } catch (error) {
-    await rm(tempPath, { force: true });
-    throw error;
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
   }
 }
 
 export async function addReferenceToConfig(
   cwd: string,
   request: AddReferenceRequest,
+  signal?: AbortSignal,
 ): Promise<string> {
   if (!isValidReferenceAlias(request.alias)) {
     throw new Error(`Invalid reference alias "${request.alias}"`);
   }
 
-  const target = getWritableConfigPath(cwd, request.scope);
+  signal?.throwIfAborted();
   const source = request.source.trim();
   if (!source) {
     throw new Error("Reference path or repository cannot be empty");
   }
-  const classified = classifyReferenceSource(source, target.baseDir, request.branch?.trim());
-  if (!classified) {
-    throw new Error("Invalid repository or branch");
-  }
+  const configDir = request.scope === "global" ? getAgentDir() : join(cwd, CONFIG_DIR_NAME);
+  await mkdir(configDir, { recursive: true });
+  const resource = join(await realpath(configDir), "references");
+  return withFileLock(resource, async (activeSignal) => {
+    const target = getWritableConfigPath(cwd, request.scope);
+    const classified = classifyReferenceSource(source, target.baseDir, request.branch?.trim());
+    if (!classified) throw new Error("Invalid repository or branch");
 
-  if (classified.kind === "local") {
-    const resolvedPath = resolveReferencePath(target.baseDir, classified.value.path);
-    try {
-      if (!statSync(resolvedPath).isDirectory()) {
-        throw new Error("not a directory");
+    if (classified.kind === "local") {
+      const resolvedPath = resolveReferencePath(target.baseDir, classified.value.path);
+      try {
+        if (!statSync(resolvedPath).isDirectory()) throw new Error("not a directory");
+      } catch {
+        throw new Error(`Local reference path does not exist or is not a directory: ${resolvedPath}`);
       }
-    } catch {
-      throw new Error(`Local reference path does not exist or is not a directory: ${resolvedPath}`);
     }
-  }
 
-  const value = classified.value;
-  const rawConfig = target.exists ? await readFile(target.path, "utf8") : "{}\n";
-  const references = parseReferencesConfigText(rawConfig).references ?? {};
-  if (Object.hasOwn(references, request.alias)) {
-    throw new Error(`Reference alias "${request.alias}" already exists`);
-  }
+    const rawConfig = target.exists ? await readFile(target.path, "utf8") : "{}\n";
+    const references = parseReferencesConfigText(rawConfig).references ?? {};
+    if (Object.hasOwn(references, request.alias)) {
+      throw new Error(`Reference alias "${request.alias}" already exists`);
+    }
 
-  const nextConfig = updateConfig(rawConfig, request.alias, value);
-  await writeFileAtomically(target.path, nextConfig);
-  return target.path;
+    const nextConfig = updateConfig(rawConfig, request.alias, classified.value);
+    await writeFileAtomically(target.path, nextConfig, activeSignal);
+    return target.path;
+  }, signal);
 }

@@ -27,6 +27,7 @@ function createAliasItem(reference: ResolvedReference): AutocompleteItem {
 async function listReferenceItems(
   reference: ResolvedReference,
   pathQuery: string,
+  quoted: boolean,
   signal?: AbortSignal,
 ): Promise<AutocompleteItem[]> {
   if (!reference.resolvedPath || signal?.aborted) {
@@ -77,10 +78,11 @@ async function listReferenceItems(
     .slice(0, MAX_SUGGESTIONS)
     .map((entry) => {
       const relative = [baseRelative, entry.name].filter(Boolean).join("/");
-      const value = `@${reference.alias}/${relative}${entry.isDirectory() ? "/" : ""}`;
+      const path = `${reference.alias}/${relative}${entry.isDirectory() ? "/" : ""}`;
+      const value = quoted || /[\s\\`"',;:!?()[\]{}<>，．：；！？（）［］｛｝“”‘’…—]|\.$/.test(path) ? `@${JSON.stringify(path)}` : `@${path}`;
       return {
         value,
-        label: value,
+        label: `@${path}`,
         description: entry.isDirectory() ? "directory" : "file",
       } satisfies AutocompleteItem;
     });
@@ -148,7 +150,7 @@ export function createReferencesAutocompleteProvider(
         return null;
       }
 
-      const items = await listReferenceItems(reference, token.pathQuery, options.signal);
+      const items = await listReferenceItems(reference, token.pathQuery, token.prefix.startsWith('@"'), options.signal);
       if (options.signal.aborted) {
         return null;
       }

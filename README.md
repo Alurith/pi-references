@@ -24,7 +24,7 @@ The goal is to bring the behavior described in OpenCode's references documentati
 - `hidden` support: hidden references do not appear in autocomplete but can still be used manually
 - Autocomplete for reference aliases and `/references` arguments
 - File browsing autocomplete inside reference directories
-- Input expansion to resolved filesystem paths
+- Input expansion to resolved filesystem paths, including quoted paths with spaces
 - Git repository cache under Pi's agent directory (`~/.pi/agent/cache/references/` by default)
 - Manual Git synchronization with `/references sync [alias]`
 
@@ -213,6 +213,10 @@ The effective path follows the agent directory returned by Pi.
 
 Git repositories are materialized in the background when the session starts. Missing repositories are cloned with depth 1 and only the selected branch; existing cached checkouts are refreshed shallowly. Startup does not wait for Git, but using a reference while its operation is still running waits for that reference to become available.
 
+Refresh refuses initially dirty checkouts and uses a non-forcing checkout that also refuses to overwrite ignored files. After a refresh, the cache has a detached HEAD at the fetched commit; later synchronization still fetches the configured branch. If origin validation fails or finds a different repository, the existing checkout is preserved and an error is shown. Save any local work before repairing that cache manually; the extension does not delete it automatically.
+
+Git operations and configuration additions use cooperative locks shared between Pi processes. Locks are renewed every 10 seconds, expire after 30 seconds without renewal, and waiting is cancellable with a 120-second limit. These locks target local filesystems, not distributed storage. They do not coordinate unrelated Git commands, external configuration writers, manually removed locks, or a process suspended beyond the expiry. A cancelled Git command may have already changed the checkout; the extension preserves it rather than attempting a destructive rollback.
+
 ### Shorthand syntax
 
 Like OpenCode, string shorthand is supported:
@@ -288,6 +292,14 @@ Compare the current implementation with @sdk/src/client.ts
 Use @docs to check the product behavior before changing this flow
 ```
 
+For spaces or literal punctuation in filenames, use Pi-style double quotes after `@`:
+
+```text
+Read @"docs/product docs/hello world.md"
+```
+
+Autocomplete inserts this form when needed and keeps the cursor inside quoted directory paths. Quoted references use JSON escaping: `\"` inside the quoted text represents a literal double quote, and `\\` represents a literal backslash. Incomplete or invalid quoted references are not expanded. Quotes and brackets around an ordinary unquoted reference are treated as surrounding prose, not as filename characters.
+
 When a reference is used, the extension expands it with its resolved filesystem path before the model receives the prompt. If its background clone or refresh is still running, input waits for that reference. The `[resolved: ...]` suffix is added only after the checkout has been verified or cloned successfully:
 
 ```text
@@ -333,7 +345,10 @@ Implemented:
 - file autocomplete inside references with path escape protection
 - background Git materialization and shallow refresh at session start
 - depth-1, single-branch Git clone
-- atomic Git clone into cache
+- atomic Git clone into cache without deleting existing checkouts
+- cross-process Git and configuration locks
+- non-forcing refresh that preserves conflicting tracked, untracked, and ignored files
+- quoted file and directory autocomplete
 - cache checkout origin validation before reuse
 - input expansion to `[resolved: /real/path]` only for available paths
 - realpath-based symlink boundary protection
@@ -360,6 +375,10 @@ This package is a Pi extension package. The package manifest declares:
 ```
 
 So Pi can install and load it directly with `pi install`.
+
+### Legacy compatibility testing
+
+When testing Pi 1.1.0 from npm, keep its `@earendil-works/pi-codemode` dependency at 1.1.0. A fresh install can otherwise select 1.2.0 and fail while importing Pi itself (`MCP_TYPESCRIPT_PREAMBLE` missing), before this extension runs. The compatibility matrix passes with that dependency aligned; no legacy dependency override is added to this extension.
 
 ## License
 

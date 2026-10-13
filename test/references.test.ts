@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import fs, { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,6 +12,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import extension from "../index.ts";
 import { loadReferences, parseReferencesConfigText, isValidReferenceAlias } from "../src/config.ts";
 import { addReferenceToConfig } from "../src/config-write.ts";
+import { withFileLock } from "../src/file-lock.ts";
 import { materializeGitReference } from "../src/git.ts";
 import { resolveInsideRoot, resolveReferencePath } from "../src/resolve.ts";
 import { expandReferencesInText } from "../src/transform.ts";
@@ -150,6 +154,129 @@ describe("reference configuration", () => {
     assert.match(saved, /preserve this comment/);
     assert.match(saved, /"toString"/);
     assert.match(saved, /\r\n/);
+  });
+
+  it("preserves concurrent additions and accepts a duplicate only once", async () => {
+    const root = await temporaryDirectory();
+    await mkdir(join(root, "docs"));
+    const request = { source: "./docs", scope: "project" as const };
+    const results = await Promise.all(["alpha", "beta"].map((alias) => addReferenceToConfig(root, { ...request, alias })));
+    assert.equal(results[0], results[1]);
+    assert.deepEqual(Object.keys(parseReferencesConfigText(await readFile(results[0], "utf8")).references!).sort(), ["alpha", "beta"]);
+    const duplicates = await Promise.allSettled([0, 1].map(() => addReferenceToConfig(root, { ...request, alias: "same" })));
+    assert.equal(duplicates.filter((result) => result.status === "fulfilled").length, 1);
+    const rejected = duplicates.find((result) => result.status === "rejected");
+    assert.match(rejected?.reason?.message ?? "", /already exists/);
+  });
+
+  it("shares a config lock through symlinked directories and preserves JSONC precedence", async () => {
+    const root = await temporaryDirectory();
+    const linked = `${root}-link`;
+    temporaryDirectories.push(linked);
+    await symlink(root, linked);
+    await mkdir(join(root, "docs"));
+    await mkdir(join(root, CONFIG_DIR_NAME));
+    const json = '{"references":{"original":{"path":"./docs"}}}\n';
+    await writeFile(join(root, CONFIG_DIR_NAME, "references.json"), json);
+    await writeFile(join(root, CONFIG_DIR_NAME, "references.jsonc"), '{\r\n // keep\r\n "references": {}\r\n}\r\n');
+    const [path] = await Promise.all([
+      addReferenceToConfig(root, { alias: "alpha", source: "./docs", scope: "project" }),
+      addReferenceToConfig(linked, { alias: "beta", source: "./docs", scope: "project" }),
+    ]);
+    const raw = await readFile(path, "utf8");
+    assert.deepEqual(Object.keys(parseReferencesConfigText(raw).references!).sort(), ["alpha", "beta"]);
+    assert.match(raw, /keep/);
+    assert.match(raw, /\r\n/);
+    assert.equal(await readFile(join(root, CONFIG_DIR_NAME, "references.json"), "utf8"), json);
+  });
+
+  it("does not save a command cancelled while waiting for the config lock", async () => {
+    const root = await temporaryDirectory();
+    await mkdir(join(root, "docs"));
+    await mkdir(join(root, CONFIG_DIR_NAME));
+    const config = join(root, CONFIG_DIR_NAME, "references.jsonc");
+    const original = '{"references":{}}\n';
+    await writeFile(config, original);
+    let release!: () => void;
+    let entered!: () => void;
+    const active = new Promise<void>((resolve) => { entered = resolve; });
+    const owner = withFileLock(join(root, CONFIG_DIR_NAME, "references"), async () => {
+      entered();
+      await new Promise<void>((resolve) => { release = resolve; });
+    });
+    await active;
+    const controller = new AbortController();
+    const adding = addReferenceToConfig(root, { alias: "cancelled", source: "./docs", scope: "project" }, controller.signal);
+    controller.abort();
+    try { await assert.rejects(adding, { name: "AbortError" }); }
+    finally { release(); await owner; }
+    assert.equal(await readFile(config, "utf8"), original);
+  });
+
+  for (const boundary of ["before", "during"] as const) {
+    it(`handles cancellation ${boundary} config publication without rollback`, async () => {
+      const root = await temporaryDirectory();
+      await mkdir(join(root, "docs"));
+      await mkdir(join(root, CONFIG_DIR_NAME));
+      const config = join(root, CONFIG_DIR_NAME, "references.jsonc");
+      const original = '{"references":{}}\n';
+      await writeFile(config, original);
+      const controller = new AbortController();
+      const originalWrite = fs.writeFile;
+      const originalRename = fs.rename;
+      if (boundary === "before") {
+        fs.writeFile = async (...args) => {
+          await originalWrite(...args);
+          if (String(args[0]).includes(".references-write-")) controller.abort();
+        };
+      } else {
+        fs.rename = async (...args) => {
+          controller.abort();
+          return originalRename(...args);
+        };
+      }
+      syncBuiltinESMExports();
+      try {
+        const adding = addReferenceToConfig(root, { alias: "docs", source: "./docs", scope: "project" }, controller.signal);
+        if (boundary === "before") {
+          await assert.rejects(adding, { name: "AbortError" });
+          assert.equal(await readFile(config, "utf8"), original);
+        } else {
+          assert.equal(await adding, config);
+          assert.deepEqual(parseReferencesConfigText(await readFile(config, "utf8")).references, { docs: { path: "./docs" } });
+        }
+      } finally {
+        fs.writeFile = originalWrite;
+        fs.rename = originalRename;
+        syncBuiltinESMExports();
+      }
+    });
+  }
+
+  it("preserves additions from separate processes", { timeout: 10000 }, async () => {
+    const root = await temporaryDirectory();
+    await mkdir(join(root, "docs"));
+    const children = ["alpha", "beta"].map((alias) => {
+      const script = `
+        import { once } from 'node:events';
+        import { addReferenceToConfig } from ${JSON.stringify(new URL("../src/config-write.ts", import.meta.url).href)};
+        process.send('ready');
+        await once(process, 'message');
+        await addReferenceToConfig(${JSON.stringify(root)}, { alias: ${JSON.stringify(alias)}, source: './docs', scope: 'project' });
+        process.disconnect();
+      `;
+      const child = spawn(process.execPath, ["--input-type=module", "-e", script], { stdio: ["ignore", "ignore", "inherit", "ipc"] });
+      return { child, ready: once(child, "message"), exited: once(child, "exit") };
+    });
+    try {
+      await Promise.all(children.map((child) => child.ready));
+      for (const { child } of children) child.send("start");
+      for (const child of children) assert.equal((await child.exited)[0], 0);
+      const raw = await readFile(join(root, CONFIG_DIR_NAME, "references.jsonc"), "utf8");
+      assert.deepEqual(Object.keys(parseReferencesConfigText(raw).references!).sort(), ["alpha", "beta"]);
+    } finally {
+      for (const { child } of children) if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    }
   });
 
   it("accepts only aliases that tokenizer can represent", () => {
@@ -522,7 +649,7 @@ describe("Git materialization", () => {
     assert.equal(calls.filter((args) => args[0] === "clone").length, 1);
     releaseFirstClone();
     const [firstWarning, secondWarning] = await Promise.all([firstOperation, secondOperation]);
-    assert.equal(firstWarning, "clone failed");
+    assert.match(firstWarning ?? "", /abort/i);
     assert.equal(secondWarning, undefined);
     assert.equal(cloneCount, 2);
     assert.ok(second.resolvedPath);

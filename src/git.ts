@@ -1,9 +1,10 @@
 import { existsSync, realpathSync } from "node:fs";
-import { mkdir, rename, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rename, rm } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { isAbsolute, join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { resolveReferencePath } from "./resolve.ts";
+import { withFileLock } from "./file-lock.ts";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { ResolvedReference } from "./types.ts";
 
@@ -26,13 +27,6 @@ export type GitSyncResult = {
   action: GitSyncAction;
   warning?: string;
 };
-
-type InFlightOperation = {
-  promise: Promise<GitOperationResult>;
-  signal?: AbortSignal;
-};
-
-const inFlightOperations = new Map<string, InFlightOperation>();
 
 function cacheKey(reference: ResolvedReference): string {
   const input = `${reference.repository ?? ""}\n${reference.branch ?? ""}\n${reference.referenceBaseDir ?? ""}`;
@@ -97,18 +91,18 @@ async function hasMatchingCheckout(
     return false;
   }
 
-  try {
-    const result = await pi.exec("git", ["-C", targetDir, "config", "--get", "remote.origin.url"], {
-      timeout: DEFAULT_TIMEOUT_MS,
-      signal: options.signal,
-    });
-    if (result.code !== 0 || !result.stdout.trim() || !reference.repository) {
-      return false;
-    }
-    return comparableRepository(result.stdout.trim()) === comparableRepository(reference.repository, reference.referenceBaseDir);
-  } catch {
-    return false;
-  }
+  const origin = await execGit(pi, ["-C", targetDir, "config", "--get", "remote.origin.url"], options);
+  return Boolean(origin.trim() && reference.repository &&
+    comparableRepository(origin.trim()) === comparableRepository(reference.repository, reference.referenceBaseDir));
+}
+
+async function execGit(pi: ExtensionAPI, args: string[], options: GitSyncOptions): Promise<string> {
+  options.signal?.throwIfAborted();
+  const result = await pi.exec("git", args, { timeout: DEFAULT_TIMEOUT_MS, signal: options.signal });
+  options.signal?.throwIfAborted();
+  if (result.killed) throw new Error("Git command cancelled or timed out");
+  if (result.code !== 0) throw new Error(result.stderr.trim() || `git exited with ${result.code}`);
+  return result.stdout;
 }
 
 function errorMessage(error: unknown): string {
@@ -142,33 +136,19 @@ function applyOperationResult(
   reference.resolvedPath = targetDir;
 }
 
-function runExclusiveGitOperation(
+async function runLockedGitOperation(
   targetDir: string,
-  operation: () => Promise<GitOperationResult>,
+  operation: (signal: AbortSignal) => Promise<GitOperationResult>,
   signal?: AbortSignal,
 ): Promise<GitOperationResult> {
-  const existing = inFlightOperations.get(targetDir);
-  if (existing) {
-    // Keep the slot until the operation settles. If its caller was aborted,
-    // retry afterward instead of passing that cancellation to the next caller.
-    return existing.promise.then((result) => {
-      if (result.action === "failed" && existing.signal?.aborted && !signal?.aborted) {
-        return runExclusiveGitOperation(targetDir, operation, signal);
-      }
-      return result;
-    });
+  try {
+    signal?.throwIfAborted();
+    await mkdir(dirname(targetDir), { recursive: true });
+    const resource = join(await realpath(dirname(targetDir)), basename(targetDir));
+    return await withFileLock(resource, operation, signal);
+  } catch (error) {
+    return failedResult(errorMessage(error));
   }
-
-  const promise = operation()
-    .catch((error: unknown) => failedResult(errorMessage(error)))
-    .finally(() => {
-      if (inFlightOperations.get(targetDir)?.promise === promise) {
-        inFlightOperations.delete(targetDir);
-      }
-    });
-
-  inFlightOperations.set(targetDir, { promise, signal });
-  return promise;
 }
 
 async function cloneReference(
@@ -181,15 +161,12 @@ async function cloneReference(
     return failedResult(`Reference "${reference.alias}" is missing repository`);
   }
 
-  const cacheRoot = getCacheRoot();
-  await mkdir(cacheRoot, { recursive: true });
-
+  options.signal?.throwIfAborted();
   if (existsSync(targetDir)) {
-    await rm(targetDir, { recursive: true, force: true });
+    return failedResult(`Checkout "${reference.alias}" cannot be reused; existing files preserved. Check its origin and save local work before repairing it.`);
   }
 
-  const tempDir = `${targetDir}.tmp-${process.pid}-${Date.now()}`;
-  await rm(tempDir, { recursive: true, force: true });
+  const tempDir = await mkdtemp(`${targetDir}.tmp-`);
 
   const cloneUrl = normalizeGitUrl(reference.repository, reference.referenceBaseDir);
   const args = ["clone", "--depth", "1", "--single-branch", "--no-tags"];
@@ -198,30 +175,14 @@ async function cloneReference(
   }
   args.push("--", cloneUrl, tempDir);
 
-  let result;
   try {
-    result = await pi.exec("git", args, {
-      timeout: DEFAULT_TIMEOUT_MS,
-      signal: options.signal,
-    });
-  } catch (error: unknown) {
-    await rm(tempDir, { recursive: true, force: true });
-    return failedResult(`git clone failed: ${errorMessage(error)}`);
-  }
-
-  if (result.code !== 0) {
-    await rm(tempDir, { recursive: true, force: true });
-    return failedResult(result.stderr.trim() || `git clone exited with ${result.code}`);
-  }
-
-  try {
+    await execGit(pi, args, options);
+    options.signal?.throwIfAborted();
     await rename(tempDir, targetDir);
-  } catch (error: unknown) {
+    return { action: "cloned" };
+  } finally {
     await rm(tempDir, { recursive: true, force: true });
-    return failedResult(errorMessage(error));
   }
-
-  return { action: "cloned" };
 }
 
 async function refreshReference(
@@ -234,25 +195,8 @@ async function refreshReference(
     return failedResult(`Reference "${reference.alias}" is missing repository`);
   }
 
-  let statusResult;
-  try {
-    statusResult = await pi.exec(
-      "git",
-      ["-C", targetDir, "status", "--porcelain", "--untracked-files=all"],
-      {
-        timeout: DEFAULT_TIMEOUT_MS,
-        signal: options.signal,
-      },
-    );
-  } catch (error: unknown) {
-    return failedResult(`git status failed: ${errorMessage(error)}`);
-  }
-
-  if (statusResult.code !== 0) {
-    return failedResult(statusResult.stderr.trim() || `git status exited with ${statusResult.code}`);
-  }
-
-  if (statusResult.stdout.trim()) {
+  const status = await execGit(pi, ["-C", targetDir, "status", "--porcelain", "--untracked-files=all"], options);
+  if (status.trim()) {
     return failedResult(`checkout "${reference.alias}" has local changes; refresh skipped`);
   }
 
@@ -269,37 +213,8 @@ async function refreshReference(
     fetchArgs.push(reference.branch);
   }
 
-  let fetchResult;
-  try {
-    fetchResult = await pi.exec("git", fetchArgs, {
-      timeout: DEFAULT_TIMEOUT_MS,
-      signal: options.signal,
-    });
-  } catch (error: unknown) {
-    return failedResult(`git fetch failed: ${errorMessage(error)}`);
-  }
-
-  if (fetchResult.code !== 0) {
-    return failedResult(fetchResult.stderr.trim() || `git fetch exited with ${fetchResult.code}`);
-  }
-
-  let resetResult;
-  try {
-    resetResult = await pi.exec(
-      "git",
-      ["-C", targetDir, "reset", "--hard", "FETCH_HEAD"],
-      {
-        timeout: DEFAULT_TIMEOUT_MS,
-        signal: options.signal,
-      },
-    );
-  } catch (error: unknown) {
-    return failedResult(`git reset failed: ${errorMessage(error)}`);
-  }
-
-  if (resetResult.code !== 0) {
-    return failedResult(resetResult.stderr.trim() || `git reset exited with ${resetResult.code}`);
-  }
+  await execGit(pi, fetchArgs, options);
+  await execGit(pi, ["-C", targetDir, "checkout", "--detach", "--no-overwrite-ignore", "FETCH_HEAD"], options);
 
   return { action: "refreshed" };
 }
@@ -314,12 +229,13 @@ export async function materializeGitReference(
     return undefined;
   }
 
-  const result = await runExclusiveGitOperation(targetDir, async () => {
-    if (await hasMatchingCheckout(pi, reference, targetDir, options)) {
+  const result = await runLockedGitOperation(targetDir, async (signal) => {
+    const lockedOptions = { signal };
+    if (await hasMatchingCheckout(pi, reference, targetDir, lockedOptions)) {
       return { action: "unchanged" };
     }
 
-    return cloneReference(pi, reference, targetDir, options);
+    return cloneReference(pi, reference, targetDir, lockedOptions);
   }, options.signal);
 
   applyOperationResult(reference, targetDir, result);
@@ -337,12 +253,13 @@ export async function synchronizeGitReference(
     return { alias: reference.alias, action: "failed", warning };
   }
 
-  const result = await runExclusiveGitOperation(targetDir, async () => {
-    if (await hasMatchingCheckout(pi, reference, targetDir, options)) {
-      return refreshReference(pi, reference, targetDir, options);
+  const result = await runLockedGitOperation(targetDir, async (signal) => {
+    const lockedOptions = { signal };
+    if (await hasMatchingCheckout(pi, reference, targetDir, lockedOptions)) {
+      return refreshReference(pi, reference, targetDir, lockedOptions);
     }
 
-    return cloneReference(pi, reference, targetDir, options);
+    return cloneReference(pi, reference, targetDir, lockedOptions);
   }, options.signal);
 
   applyOperationResult(reference, targetDir, result);
@@ -362,6 +279,10 @@ export async function synchronizeAllGitReferences(
   const results: PromiseSettledResult<GitSyncResult>[] = [];
   for (let offset = 0; offset < gitReferences.length; offset += MAX_CONCURRENT_SYNCS) {
     const batch = gitReferences.slice(offset, offset + MAX_CONCURRENT_SYNCS);
+    if (options.signal?.aborted) {
+      results.push(...batch.map((reference) => ({ status: "fulfilled" as const, value: { alias: reference.alias, action: "failed" as const, warning: "Git synchronization cancelled" } })));
+      continue;
+    }
     results.push(...await Promise.allSettled(
       batch.map((reference) => synchronizeGitReference(pi, reference, options)),
     ));
