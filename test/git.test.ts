@@ -37,11 +37,11 @@ async function fixture() {
   process.env.PI_CODING_AGENT_DIR = join(root, "agent");
   const env = { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: emptyConfig, GIT_TERMINAL_PROMPT: "0" };
   const execute = (command: string, args: string[], options?: ExecOptions): Promise<ExecResult> => {
-    if (options?.signal?.aborted) return Promise.resolve({ code: 0, killed: true, stdout: "", stderr: "" });
+    if (options?.signal?.aborted) return Promise.resolve({ code: 0, killed: true, truncated: false, stdout: "", stderr: "" });
     return new Promise((resolve) => {
       execFile(command, args, { cwd: root, env, signal: options?.signal, timeout: options?.timeout }, (error, stdout, stderr) => {
         const code = error && typeof error.code === "number" ? error.code : error ? 128 : 0;
-        resolve({ code, killed: Boolean(options?.signal?.aborted || error?.killed), stdout, stderr });
+        resolve({ code, killed: Boolean(options?.signal?.aborted || error?.killed), truncated: false, stdout, stderr });
       });
     });
   };
@@ -78,6 +78,62 @@ describe("real Git preservation", () => {
       await f.commit();
       assert.equal((await synchronizeGitReference(f.pi, f.reference)).action, "refreshed");
       assert.equal(await readFile(join(f.target, "work.txt"), "utf8"), content);
+    }
+  });
+
+  it("rejects truncated status output without fetching or changing the checkout", async () => {
+    const f = await fixture();
+    let fetched = false;
+    const pi = { exec: async (command: string, args: string[], options?: ExecOptions) => {
+      assert.equal(options?.maxBuffer, 4 * 1024 * 1024);
+      if (args.includes("fetch")) fetched = true;
+      if (args.includes("status")) {
+        return { code: 1, killed: true, truncated: true, stdout: "", stderr: "" };
+      }
+      return f.execute(command, args, options);
+    } } as ExtensionAPI;
+    const result = await synchronizeGitReference(pi, f.reference);
+    assert.equal(result.action, "failed");
+    assert.match(result.warning ?? "", /output exceeded/);
+    assert.equal(fetched, false);
+    assert.equal(await readFile(join(f.target, "work.txt"), "utf8"), "upstream-v1\n");
+  });
+
+  it("starts queued syncs while an earlier sync is still running", { timeout: 10000 }, async () => {
+    const f = await fixture();
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    let active = 0;
+    let peak = 0;
+    let slowFinished = false;
+    let queuedStartedBeforeSlowFinished = false;
+    const references = Array.from({ length: 6 }, (_, i) => ({ ...f.reference, alias: `queue${i}`, resolvedPath: undefined }));
+    const pi = { exec: async (command: string, args: string[], options?: ExecOptions) => {
+      if (args[0] !== "clone") return f.execute(command, args, options);
+      active++;
+      peak = Math.max(peak, active);
+      try {
+        if (args.at(-1)?.includes("queue0-")) {
+          await blocked;
+          slowFinished = true;
+        }
+        if (args.at(-1)?.includes("queue4-")) {
+          queuedStartedBeforeSlowFinished = !slowFinished;
+          release();
+        }
+        return await f.execute(command, args, options);
+      } finally {
+        active--;
+      }
+    } } as ExtensionAPI;
+    try {
+      const results = await synchronizeAllGitReferences(pi, references);
+      assert.equal(queuedStartedBeforeSlowFinished, true);
+      assert.ok(peak <= 4);
+      assert.deepEqual(results.map((result) => result.alias), references.map((reference) => reference.alias));
+      assert.ok(results.every((result) => result.action === "cloned"));
+    } finally {
+      release();
     }
   });
 
@@ -250,7 +306,7 @@ describe("real Git preservation", () => {
     assert.equal(await readFile(join(message.path, "sentinel.txt"), "utf8"), "keep");
   });
 
-  it("does not start later batches after cancellation", async () => {
+  it("does not start queued synchronizations after cancellation", async () => {
     const f = await fixture();
     const controller = new AbortController();
     let operations = 0;

@@ -9,6 +9,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { ResolvedReference } from "./types.ts";
 
 const DEFAULT_TIMEOUT_MS = 120_000;
+const MAX_GIT_OUTPUT_BYTES = 4 * 1024 * 1024;
 const MAX_CONCURRENT_SYNCS = 4;
 
 type GitOperationResult = {
@@ -98,8 +99,9 @@ async function hasMatchingCheckout(
 
 async function execGit(pi: ExtensionAPI, args: string[], options: GitSyncOptions): Promise<string> {
   options.signal?.throwIfAborted();
-  const result = await pi.exec("git", args, { timeout: DEFAULT_TIMEOUT_MS, signal: options.signal });
+  const result = await pi.exec("git", args, { timeout: DEFAULT_TIMEOUT_MS, signal: options.signal, maxBuffer: MAX_GIT_OUTPUT_BYTES });
   options.signal?.throwIfAborted();
+  if (result.truncated) throw new Error("Git output exceeded the 4 MiB limit; operation stopped");
   if (result.killed) throw new Error("Git command cancelled or timed out");
   if (result.code !== 0) throw new Error(result.stderr.trim() || `git exited with ${result.code}`);
   return result.stdout;
@@ -276,29 +278,25 @@ export async function synchronizeAllGitReferences(
   options: GitSyncOptions = {},
 ): Promise<GitSyncResult[]> {
   const gitReferences = references.filter((reference) => reference.kind === "git");
-  const results: PromiseSettledResult<GitSyncResult>[] = [];
-  for (let offset = 0; offset < gitReferences.length; offset += MAX_CONCURRENT_SYNCS) {
-    const batch = gitReferences.slice(offset, offset + MAX_CONCURRENT_SYNCS);
-    if (options.signal?.aborted) {
-      results.push(...batch.map((reference) => ({ status: "fulfilled" as const, value: { alias: reference.alias, action: "failed" as const, warning: "Git synchronization cancelled" } })));
-      continue;
+  const results: GitSyncResult[] = [];
+  let nextIndex = 0;
+
+  async function worker(): Promise<void> {
+    while (nextIndex < gitReferences.length) {
+      const index = nextIndex++;
+      const reference = gitReferences[index];
+      if (options.signal?.aborted) {
+        results[index] = { alias: reference.alias, action: "failed", warning: "Git synchronization cancelled" };
+        continue;
+      }
+      try {
+        results[index] = await synchronizeGitReference(pi, reference, options);
+      } catch (error: unknown) {
+        results[index] = { alias: reference.alias, action: "failed", warning: errorMessage(error) };
+      }
     }
-    results.push(...await Promise.allSettled(
-      batch.map((reference) => synchronizeGitReference(pi, reference, options)),
-    ));
   }
 
-  return results.map((result, index) => {
-    if (result.status === "fulfilled") {
-      return result.value;
-    }
-
-    const reference = gitReferences[index];
-    const warning = errorMessage(result.reason);
-    return {
-      alias: reference.alias,
-      action: "failed",
-      warning,
-    };
-  });
+  await Promise.all(Array.from({ length: Math.min(MAX_CONCURRENT_SYNCS, gitReferences.length) }, () => worker()));
+  return results;
 }

@@ -65,7 +65,8 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      const warning = await materializeGitReference(pi, reference, { signal: signal ?? controller.signal });
+      const combinedSignal = signal ? AbortSignal.any([controller.signal, signal]) : controller.signal;
+      const warning = await materializeGitReference(pi, reference, { signal: combinedSignal });
       if (warning && generation === sessionGeneration && !controller.signal.aborted && !signal?.aborted) {
         ctx.ui.notify(`pi-references: ${warning}`, "error");
       }
@@ -164,22 +165,11 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("before_agent_start", (event) => {
     const section = buildSystemPromptSection(currentReferences);
-    const sections = (
-      event.systemPromptOptions as { sections?: Record<string, string> } | undefined
-    )?.sections;
-    if (sections) {
-      if (section) {
-        sections[REFERENCE_SYSTEM_PROMPT_SECTION] = section;
-      } else {
-        delete sections[REFERENCE_SYSTEM_PROMPT_SECTION];
-      }
-      return;
-    }
-
-    // Pi 0.84–0.85 exposes systemPromptOptions but not structured sections.
+    const { sections } = event.systemPromptOptions;
     if (section) {
-      return { systemPrompt: `${event.systemPrompt}\n${section}` };
+      sections[REFERENCE_SYSTEM_PROMPT_SECTION] = section;
+    } else {
+      delete sections[REFERENCE_SYSTEM_PROMPT_SECTION];
     }
-    return undefined;
   });
 }

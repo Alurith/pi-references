@@ -414,10 +414,6 @@ describe("extension integration", () => {
       { value: "sdk", label: "sdk", description: "SDK source" },
     ]);
 
-    const legacyEvent = { systemPrompt: "base", systemPromptOptions: {} } as any;
-    const legacyResult = beforeAgentStart(legacyEvent, {}) as { systemPrompt?: string } | undefined;
-    assert.match(legacyResult?.systemPrompt ?? "", /^base\nAvailable references:/);
-
     const sessionShutdown = handlers.get("session_shutdown");
     assert.ok(sessionShutdown);
     await sessionShutdown({}, {});

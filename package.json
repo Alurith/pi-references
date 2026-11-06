@@ -1,12 +1,13 @@
 {
   "name": "pi-references",
-  "version": "0.2.4",
+  "version": "0.3.0",
   "description": "Pi extension that implements OpenCode-style references",
   "license": "MIT",
   "files": [
     "index.ts",
     "src",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "type": "module",
@@ -33,8 +34,8 @@
     "proper-lockfile": "^4.1.2"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": ">=0.84.0 <2.0.0",
-    "@earendil-works/pi-tui": ">=0.84.0 <2.0.0",
+    "@earendil-works/pi-coding-agent": "1.5.0",
+    "@earendil-works/pi-tui": "1.5.0",
     "@types/node": "^22.20.1",
     "@types/proper-lockfile": "^4.1.4",
     "typescript": "^5.9.3"
