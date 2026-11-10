@@ -1,10 +1,11 @@
 # Changelog
 
-## Unreleased
+## [0.4.0] - 2026-11-10
 
 - Apply `/references add` in the current session without reloading other extensions. Respect project trust and preserve unchanged Git checkout paths.
 - Add read-only `/references status [alias]` with alias completion, checkout commit verification, and Git operation state.
 - Cancel and await Git work from commands, input, and autocomplete during session shutdown.
+- Cancel interactive reference dialogs when the session ends so shutdown does not wait for user input.
 - Pin Pi development dependencies to 1.5.2.
 
 ## [0.3.0] - 2026-11-06
