@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createReferencesAutocompleteProvider } from "./src/autocomplete.ts";
 import { loadReferences } from "./src/config.ts";
 import {
@@ -8,12 +8,6 @@ import {
 import { registerReferenceCommands } from "./src/commands.ts";
 import { expandReferencesInText, getReferencedAliases } from "./src/transform.ts";
 import type { ResolvedReference } from "./src/types.ts";
-
-let currentReferences: ResolvedReference[] = [];
-let sessionAbortController: AbortController | undefined;
-let sessionGeneration = 0;
-const sessionSyncPromises = new Set<Promise<void>>();
-let autocompleteRegistered = false;
 
 function sanitizeDescription(description: string): string {
   return description.replace(/\s+/g, " ").trim().slice(0, 500);
@@ -45,41 +39,51 @@ function buildSystemPromptSection(references: ResolvedReference[]): string {
 }
 
 export default function (pi: ExtensionAPI) {
-  registerReferenceCommands(pi, currentReferences);
+  const currentReferences: ResolvedReference[] = [];
+  let sessionAbortController: AbortController | undefined;
+  let sessionGeneration = 0;
+  const sessionSyncPromises = new Set<Promise<unknown>>();
+  let autocompleteRegistered = false;
+  let sessionContext: ExtensionContext | undefined;
 
-  pi.on("session_start", (_event, ctx) => {
-    sessionAbortController?.abort();
-    const controller = new AbortController();
-    sessionAbortController = controller;
-    const generation = ++sessionGeneration;
+  function run<T>(operation: (signal: AbortSignal) => Promise<T>, signal?: AbortSignal): Promise<T> {
+    const sessionSignal = sessionAbortController?.signal ?? AbortSignal.abort();
+    const combined = signal ? AbortSignal.any([sessionSignal, signal]) : sessionSignal;
+    const promise = operation(combined);
+    sessionSyncPromises.add(promise);
+    promise.then(() => sessionSyncPromises.delete(promise), () => sessionSyncPromises.delete(promise));
+    return promise;
+  }
 
+  function loadContext(ctx: ExtensionContext): void {
+    const controller = sessionAbortController;
+    if (!controller || controller.signal.aborted) return;
+    const generation = sessionGeneration;
     const loaded = loadReferences(ctx.cwd, ctx.isProjectTrusted());
-    currentReferences.splice(0, currentReferences.length, ...loaded.references);
+    const next = loaded.references.map((reference) => {
+      const previous = currentReferences.find((item) => item.alias === reference.alias);
+      if (previous?.kind === "git" && reference.kind === "git" && previous.repository === reference.repository && previous.branch === reference.branch && previous.referenceBaseDir === reference.referenceBaseDir) {
+        previous.description = reference.description;
+        previous.hidden = reference.hidden;
+        return previous;
+      }
+      return reference;
+    });
+    const added = next.filter((reference) => !currentReferences.includes(reference));
+    currentReferences.splice(0, currentReferences.length, ...next);
 
     for (const warning of loaded.warnings) {
       ctx.ui.notify(`pi-references: ${warning}`, "error");
     }
 
-    const ensureReferenceAvailable = async (reference: ResolvedReference, signal?: AbortSignal): Promise<void> => {
-      if (reference.kind !== "git" || controller.signal.aborted || signal?.aborted) {
-        return;
-      }
-
-      const combinedSignal = signal ? AbortSignal.any([controller.signal, signal]) : controller.signal;
-      const warning = await materializeGitReference(pi, reference, { signal: combinedSignal });
-      if (warning && generation === sessionGeneration && !controller.signal.aborted && !signal?.aborted) {
-        ctx.ui.notify(`pi-references: ${warning}`, "error");
-      }
-    };
-
     if (!autocompleteRegistered) {
-      ctx.ui.addAutocompleteProvider(createReferencesAutocompleteProvider(currentReferences, ensureReferenceAvailable));
+      ctx.ui.addAutocompleteProvider(createReferencesAutocompleteProvider(currentReferences, ensureAvailable));
       autocompleteRegistered = true;
     }
 
     // Clone and refresh all configured Git references in the background. Do not
     // await this promise: Pi should finish startup while Git works asynchronously.
-    const syncPromise = synchronizeAllGitReferences(pi, currentReferences, { signal: controller.signal })
+    const syncPromise = run((signal) => synchronizeAllGitReferences(pi, added, { signal }))
       .then((results) => {
         if (generation !== sessionGeneration || controller.signal.aborted) {
           return;
@@ -99,16 +103,33 @@ export default function (pi: ExtensionAPI) {
         const message = error instanceof Error ? error.message : String(error);
         ctx.ui.notify(`pi-references: background Git sync failed: ${message}`, "warning");
       });
-    sessionSyncPromises.add(syncPromise);
-    syncPromise.then(
-      () => sessionSyncPromises.delete(syncPromise),
-      () => sessionSyncPromises.delete(syncPromise),
-    );
+    void syncPromise;
+  }
+
+  async function ensureAvailable(reference: ResolvedReference, signal?: AbortSignal): Promise<void> {
+    if (reference.kind !== "git" || !currentReferences.includes(reference) || sessionAbortController?.signal.aborted) return;
+    const generation = sessionGeneration;
+    const warning = await run((combined) => materializeGitReference(pi, reference, { signal: combined }), signal);
+    if (warning && generation === sessionGeneration && !sessionAbortController?.signal.aborted && !signal?.aborted) {
+      sessionContext?.ui.notify(`pi-references: ${warning}`, "error");
+    }
+  }
+
+  registerReferenceCommands(pi, currentReferences, { reload: loadContext, run });
+
+  pi.on("session_start", (_event, ctx) => {
+    sessionAbortController?.abort();
+    sessionAbortController = new AbortController();
+    sessionGeneration++;
+    sessionContext = ctx;
+    currentReferences.splice(0, currentReferences.length);
+    loadContext(ctx);
   });
 
   pi.on("session_shutdown", async () => {
     sessionAbortController?.abort();
     sessionAbortController = undefined;
+    sessionContext = undefined;
     sessionGeneration++;
 
     // Do not let the next session reuse a cache directory while any previous
@@ -136,7 +157,7 @@ export default function (pi: ExtensionAPI) {
 
     const results = await Promise.all(referencesToMaterialize.map(async (reference) => ({
       reference,
-      warning: await materializeGitReference(pi, reference, { signal: inputSignal }),
+      warning: await run((signal) => materializeGitReference(pi, reference, { signal }), inputSignal),
     })));
     for (const { warning } of results) {
       if (warning && inputGeneration === sessionGeneration && !inputSignal?.aborted) {

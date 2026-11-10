@@ -30,7 +30,7 @@ The goal is to bring the behavior described in OpenCode's references documentati
 
 ## Compatibility
 
-- Pi **>=1.5.0 <2.0.0**; verified with **1.5.0**
+- Pi **>=1.5.0 <2.0.0**; verified with **1.5.2**
 - Node.js **>=22.19.0**, as required by Pi
 
 The extension uses Pi's exported `CONFIG_DIR_NAME` and `getAgentDir()`. The
@@ -267,7 +267,16 @@ Use `--global` to write the global configuration instead:
 /references add --global sdk OWNER/sdk-repo main
 ```
 
-The command writes `.pi/references.json`/`.jsonc` (or the global equivalent) and tells you to run `/reload`. It does not reload the extension automatically.
+The command writes `.pi/references.json`/`.jsonc` (or the global equivalent) and applies the configuration in the current session. Local references are immediately available in autocomplete and input expansion. New Git references synchronize in the background. Existing unchanged Git references keep their checkout paths. Project entries remain inactive while the project is not trusted. Other extensions are not reloaded.
+
+Inspect references without cloning or fetching:
+
+```text
+/references status
+/references status sdk
+```
+
+Status shows the alias, type, path, configured branch or remote default, and effective commit when the checkout can be verified. Git operation states are `pending`, `syncing`, `available` after materialization, `synchronized` after sync, or `failed` with an error. A failed refresh can still have a usable checkout. Status reads Git metadata but never refreshes the checkout. Both local and Git aliases complete after `status`.
 
 To retry Git synchronization manually:
 

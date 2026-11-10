@@ -342,6 +342,7 @@ describe("extension integration", () => {
     assert.deepEqual(commandOptions.getArgumentCompletions(""), [
       { value: "add", label: "add" },
       { value: "sync", label: "sync" },
+      { value: "status", label: "status" },
     ]);
     assert.deepEqual(commandOptions.getArgumentCompletions("add "), [
       { value: "--global", label: "--global" },
@@ -501,6 +502,213 @@ describe("extension integration", () => {
     releaseFirst();
     await shutdownPromise;
     assert.equal(shutdownFinished, true);
+  });
+});
+
+describe("live reference lifecycle", () => {
+  function harness(exec: ExtensionAPI["exec"] = async () => ({ code: 128, killed: false, truncated: false, stdout: "", stderr: "offline" })) {
+    const handlers = new Map<string, (event: any, ctx: any) => any>();
+    let command: any;
+    let provider: any;
+    let registrations = 0;
+    const messages: string[] = [];
+    extension({
+      exec,
+      on(event: string, handler: any) { handlers.set(event, handler); },
+      registerCommand(_name: string, options: any) { command = options; },
+    } as unknown as ExtensionAPI);
+    const context = (cwd: string, trusted = true) => ({
+      cwd, signal: new AbortController().signal, isProjectTrusted: () => trusted,
+      ui: {
+        notify(message: string) { messages.push(message); },
+        addAutocompleteProvider(factory: any) {
+          registrations++;
+          provider = factory({ getSuggestions: async () => null, applyCompletion() {} });
+        },
+      },
+    });
+    return {
+      handlers, messages, context,
+      command: (args: string, ctx: any) => command.handler(args, ctx),
+      completions: (prefix: string) => command.getArgumentCompletions(prefix),
+      suggest: (text: string) => provider.getSuggestions([text], 0, text.length, { signal: new AbortController().signal }),
+      registrations: () => registrations,
+    };
+  }
+
+  for (const pendingPrompt of [0, 1, 2]) {
+    it(`cancels interactive addition at prompt ${pendingPrompt + 1} during shutdown`, { timeout: 2_000 }, async () => {
+      const root = await temporaryDirectory();
+      process.env.PI_CODING_AGENT_DIR = join(root, "agent");
+      const f = harness();
+      const base = f.context(root);
+      let entered!: () => void;
+      const started = new Promise<void>((resolve) => { entered = resolve; });
+      let prompt = 0;
+      let inputSignal: AbortSignal | undefined;
+      const ctx = {
+        ...base,
+        hasUI: true,
+        ui: {
+          ...base.ui,
+          async input(_title: string, _placeholder?: string, options?: { signal?: AbortSignal }) {
+            if (prompt++ < pendingPrompt) return prompt === 1 ? "docs" : "./docs";
+            inputSignal = options?.signal;
+            entered();
+            return new Promise<undefined>((resolve) => {
+              if (inputSignal?.aborted) resolve(undefined);
+              else inputSignal?.addEventListener("abort", () => resolve(undefined), { once: true });
+            });
+          },
+        },
+      };
+      f.handlers.get("session_start")!({}, ctx);
+      const command = f.command("", ctx);
+      await started;
+      await f.handlers.get("session_shutdown")!({}, ctx);
+      await command;
+      assert.equal(inputSignal?.aborted, true);
+      await assert.rejects(readFile(join(root, CONFIG_DIR_NAME, "references.jsonc")), { code: "ENOENT" });
+    });
+  }
+
+  it("applies local additions immediately and reports status arguments", async () => {
+    const root = await temporaryDirectory();
+    process.env.PI_CODING_AGENT_DIR = join(root, "agent");
+    await mkdir(join(root, "docs"));
+    const f = harness();
+    const ctx = f.context(root);
+    f.handlers.get("session_start")!({}, ctx);
+    await f.command("status", ctx);
+    assert.match(f.messages.at(-1)!, /No references configured/);
+    await f.command("add docs ./docs", ctx);
+    assert.doesNotMatch(f.messages.at(-1)!, /reload/i);
+    assert.equal((await f.suggest("@doc")).items[0].value, "@docs");
+    assert.equal((await f.handlers.get("input")!({ text: "@docs" }, ctx)).action, "transform");
+    assert.equal(f.registrations(), 1);
+    assert.equal(f.completions("status d")[0].value, "docs");
+    await f.command("status docs", ctx);
+    assert.match(f.messages.at(-1)!, /docs \| local \| path/);
+    await f.command("status missing", ctx);
+    assert.match(f.messages.at(-1)!, /Unknown reference/);
+    for (const args of ["status docs extra", "status --unknown", 'status ""']) {
+      await f.command(args, ctx);
+      assert.match(f.messages.at(-1)!, /Usage: \/references status/);
+    }
+    await f.handlers.get("session_shutdown")!({}, ctx);
+  });
+
+  it("materializes a Git addition live and preserves its path when another reference is added", async () => {
+    const root = await temporaryDirectory();
+    process.env.PI_CODING_AGENT_DIR = join(root, "agent");
+    await mkdir(join(root, "docs"));
+    let clones = 0;
+    const f = harness(async (_command, args) => {
+      if (args[0] === "clone") {
+        clones++;
+        const target = args.at(-1)!;
+        await mkdir(join(target, ".git"));
+        await writeFile(join(target, "source.ts"), "source");
+      }
+      return { code: 0, killed: false, truncated: false, stdout: args.includes("config") ? "https://github.com/owner/sdk.git\n" : "", stderr: "" };
+    });
+    const ctx = f.context(root);
+    f.handlers.get("session_start")!({}, ctx);
+    await f.command("add sdk owner/sdk", ctx);
+    const input = await f.handlers.get("input")!({ text: "@sdk/source.ts" }, ctx);
+    assert.equal(input.action, "transform");
+    assert.match(input.text, /source.ts \[resolved:/);
+    assert.ok((await f.suggest("@sdk/")).items.some((item: any) => item.value === "@sdk/source.ts"));
+    const path = (await f.suggest("@sdk")).items[0].description;
+    assert.match(path, /cache.*references/);
+    await f.command("add docs ./docs", ctx);
+    assert.equal((await f.suggest("@sdk")).items[0].description, path);
+    assert.equal(clones, 1);
+    await f.handlers.get("session_shutdown")!({}, ctx);
+  });
+
+  for (const source of ["input", "autocomplete", "sync"] as const) {
+    it(`cancels and awaits active ${source} Git work`, async () => {
+      const root = await temporaryDirectory();
+      process.env.PI_CODING_AGENT_DIR = join(root, "agent");
+      await mkdir(join(root, CONFIG_DIR_NAME));
+      await writeFile(join(root, CONFIG_DIR_NAME, "references.json"), JSON.stringify({ references: { sdk: "owner/sdk" } }));
+      let calls = 0;
+      let release!: () => void;
+      let entered!: () => void;
+      const started = new Promise<void>((resolve) => { entered = resolve; });
+      let activeSignal: AbortSignal | undefined;
+      const f = harness(async (_command, _args, options) => {
+        if (++calls === 1) return { code: 128, killed: false, truncated: false, stdout: "", stderr: "offline" };
+        activeSignal = options?.signal;
+        entered();
+        await new Promise<void>((resolve) => { release = resolve; });
+        return { code: 128, killed: false, truncated: false, stdout: "", stderr: "offline" };
+      });
+      const ctx = f.context(root);
+      f.handlers.get("session_start")!({}, ctx);
+      // The startup attempt owns the lock until the explicit request can retry.
+      const operation = source === "input" ? f.handlers.get("input")!({ text: "@sdk" }, ctx)
+        : source === "autocomplete" ? f.suggest("@sdk/") : f.command("sync sdk", ctx);
+      await started;
+      let finished = false;
+      const shutdown = f.handlers.get("session_shutdown")!({}, ctx).then(() => { finished = true; });
+      assert.equal(activeSignal?.aborted, true);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(finished, false);
+      release();
+      await Promise.all([operation, shutdown]);
+      assert.equal(finished, true);
+    });
+  }
+
+  it("does not activate additions in an untrusted project", async () => {
+    const root = await temporaryDirectory();
+    process.env.PI_CODING_AGENT_DIR = join(root, "agent");
+    await mkdir(join(root, "docs"));
+    const f = harness();
+    const ctx = f.context(root, false);
+    f.handlers.get("session_start")!({}, ctx);
+    await f.command("add docs ./docs", ctx);
+    assert.match(f.messages.at(-1)!, /Not active.*not trusted/);
+    assert.equal(await f.suggest("@doc"), null);
+    assert.deepEqual(await f.handlers.get("input")!({ text: "@docs" }, ctx), { action: "continue" });
+    await f.handlers.get("session_shutdown")!({}, ctx);
+  });
+
+  it("tracks live Git additions through shutdown and drops stale autocomplete after session changes", async () => {
+    const root = await temporaryDirectory();
+    const next = await temporaryDirectory();
+    process.env.PI_CODING_AGENT_DIR = join(root, "agent");
+    let release!: () => void;
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    let gitSignal: AbortSignal | undefined;
+    const f = harness(async (_command, _args, options) => {
+      gitSignal = options?.signal;
+      entered();
+      await new Promise<void>((resolve) => { release = resolve; });
+      return { code: 128, killed: false, truncated: false, stdout: "", stderr: "offline" };
+    });
+    const ctx = f.context(root);
+    f.handlers.get("session_start")!({}, ctx);
+    await f.command("add sdk owner/sdk main", ctx);
+    await started;
+    assert.equal(f.completions("status s")[0].value, "sdk");
+    await f.command("status sdk", ctx);
+    assert.match(f.messages.at(-1)!, /sync syncing/);
+    const suggestions = f.suggest("@sdk/");
+    f.handlers.get("session_start")!({}, f.context(next));
+    assert.equal(gitSignal?.aborted, true);
+    assert.equal(await suggestions, null);
+    assert.equal(f.registrations(), 1);
+    let finished = false;
+    const shutdown = f.handlers.get("session_shutdown")!({}, ctx).then(() => { finished = true; });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(finished, false);
+    release();
+    await shutdown;
+    assert.equal(finished, true);
   });
 });
 

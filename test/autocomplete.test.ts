@@ -24,6 +24,25 @@ async function fixture() {
 }
 
 describe("reference completion round trips", () => {
+  it("does not return paths from a reference replaced during completion", async () => {
+    const f = await fixture();
+    await writeFile(join(f.root, "old.txt"), "old session");
+    let release!: () => void;
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const provider = createReferencesAutocompleteProvider(f.references, async () => {
+      entered();
+      await new Promise<void>((resolve) => { release = resolve; });
+    })(f.native);
+    const pending = provider.getSuggestions(["@docs/"], 0, 6, { signal: new AbortController().signal });
+    await started;
+    f.references.splice(0, f.references.length, { alias: "next", kind: "local", resolvedPath: f.root, hidden: false });
+    release();
+    assert.equal(await pending, null);
+    const next = await provider.getSuggestions(["@next"], 0, 5, { signal: new AbortController().signal });
+    assert.equal(next?.items[0]?.value, "@next");
+  });
+
   for (const [filename, query, token] of [
     ["guide.md", "gui", "@docs/guide.md"],
     ["hello world.md", "hel", '@"docs/hello world.md"'],

@@ -112,7 +112,9 @@ export function createReferencesAutocompleteProvider(
           return baseSuggestions;
         }
 
+        if (options.signal.aborted) return null;
         const referenceItems = visibleReferences
+          .filter((reference) => references.includes(reference))
           .filter((reference) => reference.alias.toLowerCase().includes(token.aliasQuery.toLowerCase()))
           .slice(0, MAX_SUGGESTIONS)
           .map(createAliasItem);
@@ -146,12 +148,12 @@ export function createReferencesAutocompleteProvider(
       }
 
       await ensureReferenceAvailable(reference, options.signal);
-      if (options.signal.aborted) {
+      if (options.signal.aborted || !references.includes(reference)) {
         return null;
       }
 
       const items = await listReferenceItems(reference, token.pathQuery, token.prefix.startsWith('@"'), options.signal);
-      if (options.signal.aborted) {
+      if (options.signal.aborted || !references.includes(reference)) {
         return null;
       }
       if (items.length === 0) {

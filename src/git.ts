@@ -12,6 +12,26 @@ const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_GIT_OUTPUT_BYTES = 4 * 1024 * 1024;
 const MAX_CONCURRENT_SYNCS = 4;
 
+type GitState = { kind: "available" } | { kind: "synchronized" } | { kind: "failed"; warning: string };
+const gitStates = new WeakMap<ResolvedReference, GitState>();
+const activeOperations = new WeakMap<ResolvedReference, number>();
+
+export async function getReferenceStatus(pi: ExtensionAPI, reference: ResolvedReference, options: GitSyncOptions = {}): Promise<string> {
+  if (reference.kind === "local") return `${reference.alias} | local | path ${reference.resolvedPath ?? "unavailable"}`;
+  const state = gitStates.get(reference);
+  const sync = (activeOperations.get(reference) ?? 0) > 0 ? "syncing" : state?.kind ?? "pending";
+  const target = getTargetDir(reference);
+  const fields = [reference.alias, "git", `path ${target ?? "unavailable"}`, `branch ${reference.branch ?? "default (remote HEAD)"}`, `sync ${sync}${sync === "failed" && state?.kind === "failed" ? ` (${state.warning})` : ""}`];
+  try {
+    if (target && await hasMatchingCheckout(pi, reference, target, options)) {
+      fields.push(`commit ${(await execGit(pi, ["-C", target, "rev-parse", "--verify", "HEAD^{commit}"], options)).trim()}`);
+    } else fields.push("checkout unavailable");
+  } catch (error) {
+    fields.push(`checkout unavailable (${errorMessage(error)})`);
+  }
+  return fields.join(" | ");
+}
+
 type GitOperationResult = {
   action: GitSyncAction;
   warning?: string;
@@ -125,7 +145,14 @@ function applyOperationResult(
   reference: ResolvedReference,
   targetDir: string,
   result: GitOperationResult,
+  refresh = false,
 ): void {
+  activeOperations.set(reference, (activeOperations.get(reference) ?? 1) - 1);
+  if (result.action === "failed") {
+    gitStates.set(reference, { kind: "failed", warning: result.warning ?? "Git operation failed" });
+  } else if (refresh || !gitStates.has(reference)) {
+    gitStates.set(reference, { kind: refresh ? "synchronized" : "available" });
+  }
   // A failed clone must not be exposed as a usable filesystem path. An
   // existing checkout remains usable when only its refresh failed.
   if (result.action === "failed") {
@@ -231,6 +258,7 @@ export async function materializeGitReference(
     return undefined;
   }
 
+  activeOperations.set(reference, (activeOperations.get(reference) ?? 0) + 1);
   const result = await runLockedGitOperation(targetDir, async (signal) => {
     const lockedOptions = { signal };
     if (await hasMatchingCheckout(pi, reference, targetDir, lockedOptions)) {
@@ -255,6 +283,7 @@ export async function synchronizeGitReference(
     return { alias: reference.alias, action: "failed", warning };
   }
 
+  activeOperations.set(reference, (activeOperations.get(reference) ?? 0) + 1);
   const result = await runLockedGitOperation(targetDir, async (signal) => {
     const lockedOptions = { signal };
     if (await hasMatchingCheckout(pi, reference, targetDir, lockedOptions)) {
@@ -264,7 +293,7 @@ export async function synchronizeGitReference(
     return cloneReference(pi, reference, targetDir, lockedOptions);
   }, options.signal);
 
-  applyOperationResult(reference, targetDir, result);
+  applyOperationResult(reference, targetDir, result, true);
   return {
     alias: reference.alias,
     action: result.action,

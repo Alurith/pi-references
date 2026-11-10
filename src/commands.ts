@@ -8,28 +8,41 @@ import {
   type AddReferenceRequest,
   type ReferenceScope,
 } from "./config-write.ts";
-import { synchronizeAllGitReferences } from "./git.ts";
+import { isValidReferenceAlias } from "./config.ts";
+import { getReferenceStatus, synchronizeAllGitReferences } from "./git.ts";
 import type { ResolvedReference } from "./types.ts";
 
 const STATUS_KEY = "pi-references";
 const ADD_USAGE = "Usage: /references add [--global] <alias> <path-or-repository> [branch]";
 const SYNC_USAGE = "Usage: /references sync [alias]";
+const STATUS_USAGE = "Usage: /references status [alias]";
+
+export type ReferenceRuntime = {
+  reload: (ctx: ExtensionCommandContext) => void;
+  run: <T>(operation: (signal: AbortSignal) => Promise<T>, signal?: AbortSignal) => Promise<T>;
+};
 
 export function registerReferenceCommands(
   pi: ExtensionAPI,
   references: ResolvedReference[],
+  runtime: ReferenceRuntime,
 ): void {
   pi.registerCommand("references", {
     description: "Manage pi-references entries",
     getArgumentCompletions: (argumentPrefix) =>
       getReferenceArgumentCompletions(argumentPrefix, references),
-    handler: (args, ctx) => handleReferencesCommand(args, ctx, pi, references),
+    handler: (args, ctx) => runtime.run((signal) => {
+      const context: ExtensionCommandContext = Object.create(ctx);
+      Object.defineProperty(context, "signal", { value: signal, configurable: true });
+      return handleReferencesCommand(args, context, pi, references, runtime);
+    }, ctx.signal),
   });
 }
 
 type ParsedCommand =
   | { kind: "add"; request: AddReferenceRequest }
   | { kind: "sync"; alias?: string }
+  | { kind: "status"; alias?: string }
   | { kind: "interactive" }
   | { kind: "error"; message: string };
 
@@ -108,7 +121,7 @@ function getReferenceArgumentCompletions(
   const completed = trailingSpace ? tokens : tokens.slice(0, -1);
 
   if (completed.length === 0) {
-    return ["add", "sync"]
+    return ["add", "sync", "status"]
       .filter((value) => value.startsWith(current))
       .map((value) => ({ value, label: value }));
   }
@@ -120,9 +133,9 @@ function getReferenceArgumentCompletions(
     return null;
   }
 
-  if (completed[0] === "sync" && completed.length === 1) {
+  if ((completed[0] === "sync" || completed[0] === "status") && completed.length === 1) {
     return references
-      .filter((reference) => reference.kind === "git")
+      .filter((reference) => completed[0] === "status" || reference.kind === "git")
       .filter((reference) => reference.alias.startsWith(current))
       .map((reference) => ({
         value: reference.alias,
@@ -141,19 +154,19 @@ function parseReferencesCommand(args: string): ParsedCommand {
 
   const tokens = tokenizeCommandArgs(args);
   if (!tokens) {
-    return { kind: "error", message: `${ADD_USAGE} or ${SYNC_USAGE}` };
+    return { kind: "error", message: `${ADD_USAGE} or ${SYNC_USAGE} or ${STATUS_USAGE}` };
   }
 
-  if (tokens[0] === "sync") {
+  if (tokens[0] === "sync" || tokens[0] === "status") {
     const remaining = tokens.slice(1);
-    if (remaining.length > 1) {
-      return { kind: "error", message: SYNC_USAGE };
+    if (remaining.length > 1 || (remaining.length === 1 && !isValidReferenceAlias(remaining[0]))) {
+      return { kind: "error", message: tokens[0] === "status" ? STATUS_USAGE : SYNC_USAGE };
     }
-    return { kind: "sync", alias: remaining[0] };
+    return { kind: tokens[0], alias: remaining[0] };
   }
 
   if (tokens[0] !== "add") {
-    return { kind: "error", message: `${ADD_USAGE} or ${SYNC_USAGE}` };
+    return { kind: "error", message: `${ADD_USAGE} or ${SYNC_USAGE} or ${STATUS_USAGE}` };
   }
 
   let index = 1;
@@ -187,17 +200,17 @@ async function promptAddReference(
     return undefined;
   }
 
-  const alias = (await ctx.ui.input("Reference alias", "sdk"))?.trim();
+  const alias = (await ctx.ui.input("Reference alias", "sdk", { signal: ctx.signal }))?.trim();
   if (!alias) {
     return undefined;
   }
 
-  const source = (await ctx.ui.input("Path or repository", "OWNER/repository"))?.trim();
+  const source = (await ctx.ui.input("Path or repository", "OWNER/repository", { signal: ctx.signal }))?.trim();
   if (!source) {
     return undefined;
   }
 
-  const branch = (await ctx.ui.input("Branch (optional)", "main"))?.trim();
+  const branch = (await ctx.ui.input("Branch (optional)", "main", { signal: ctx.signal }))?.trim();
   return {
     alias,
     source,
@@ -234,6 +247,7 @@ async function handleSyncCommand(
   ctx.ui.setStatus?.(STATUS_KEY, `Syncing ${alias ?? "Git references"}…`);
   try {
     const results = await synchronizeAllGitReferences(pi, selected, { signal: ctx.signal });
+    if (ctx.signal?.aborted) return;
     const failures = results.filter((result) => result.action === "failed");
     if (failures.length > 0) {
       const details = failures
@@ -253,10 +267,22 @@ async function handleReferencesCommand(
   ctx: ExtensionCommandContext,
   pi: ExtensionAPI,
   references: readonly ResolvedReference[],
+  runtime: ReferenceRuntime,
 ): Promise<void> {
   const parsed = parseReferencesCommand(args);
   if (parsed.kind === "error") {
     ctx.ui.notify(parsed.message, "warning");
+    return;
+  }
+
+  if (parsed.kind === "status") {
+    const selected = references.filter((reference) => !parsed.alias || reference.alias === parsed.alias);
+    if (selected.length === 0) {
+      ctx.ui.notify(parsed.alias ? `Unknown reference "${parsed.alias}"` : "No references configured", "warning");
+      return;
+    }
+    const statuses = await Promise.all(selected.map((reference) => getReferenceStatus(pi, reference, { signal: ctx.signal })));
+    if (!ctx.signal?.aborted) ctx.ui.notify(statuses.join("\n"), "info");
     return;
   }
 
@@ -273,8 +299,14 @@ async function handleReferencesCommand(
 
   try {
     const configPath = await addReferenceToConfig(ctx.cwd, request, ctx.signal);
+    if (ctx.signal?.aborted) {
+      ctx.ui.notify(`Reference "${request.alias}" saved in ${configPath}. Session ended before activation.`, "info");
+      return;
+    }
+    runtime.reload(ctx);
+    const active = request.scope === "global" || ctx.isProjectTrusted();
     ctx.ui.notify(
-      `Reference "${request.alias}" saved in ${configPath}. Run /reload to apply it.`,
+      `Reference "${request.alias}" saved in ${configPath}. ${active ? "Configuration applied in this session." : "Not active because this project is not trusted."}`,
       "info",
     );
   } catch (error: unknown) {

@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, it } from "node:test";
 import type { ExtensionAPI, ExecOptions, ExecResult } from "@earendil-works/pi-coding-agent";
-import { materializeGitReference, synchronizeGitReference, synchronizeAllGitReferences } from "../src/git.ts";
+import { getReferenceStatus, materializeGitReference, synchronizeGitReference, synchronizeAllGitReferences } from "../src/git.ts";
 import type { ResolvedReference } from "../src/types.ts";
 
 const roots: string[] = [];
@@ -70,6 +70,32 @@ async function fixture() {
 }
 
 describe("real Git preservation", () => {
+  it("reports verified commits and actual operation state without changing the checkout", async () => {
+    const f = await fixture();
+    const calls: string[][] = [];
+    const pi = { exec: async (command: string, args: string[], options?: ExecOptions) => {
+      calls.push(args);
+      return f.execute(command, args, options);
+    } } as ExtensionAPI;
+    const commit = await f.git("-C", f.target, "rev-parse", "HEAD");
+    assert.match(await getReferenceStatus(pi, f.reference), new RegExp(`sync available.*commit ${commit}`));
+    const pending = { ...f.reference, branch: undefined, resolvedPath: undefined };
+    const pendingStatus = await getReferenceStatus(pi, pending);
+    assert.match(pendingStatus, /branch default \(remote HEAD\).*sync pending.*checkout unavailable/);
+    await writeFile(join(f.target, "work.txt"), "local changes");
+    assert.equal((await synchronizeGitReference(f.pi, f.reference)).action, "failed");
+    assert.match(await getReferenceStatus(pi, f.reference), /sync failed.*local changes.*commit/);
+    await materializeGitReference(f.pi, f.reference);
+    assert.match(await getReferenceStatus(pi, f.reference), /sync failed/);
+    assert.equal(await readFile(join(f.target, "work.txt"), "utf8"), "local changes");
+    assert.ok(calls.every((args) => !args.includes("clone") && !args.includes("fetch") && !args.includes("checkout")));
+    const controller = new AbortController();
+    controller.abort();
+    assert.match(await getReferenceStatus(pi, f.reference, { signal: controller.signal }), /checkout unavailable.*abort/i);
+    await f.git("-C", f.target, "remote", "set-url", "origin", "https://example.invalid/wrong");
+    assert.doesNotMatch(await getReferenceStatus(pi, f.reference), /commit [a-f0-9]{40}/);
+  });
+
   it("clones shallowly and refreshes repeatedly from the configured branch", async () => {
     const f = await fixture();
     assert.equal(await f.git("-C", f.target, "rev-parse", "--is-shallow-repository"), "true");
