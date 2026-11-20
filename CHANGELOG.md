@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.5.0] - 2026-11-20
+
+- Verify compatibility with Pi 1.6.0 and update Pi development dependencies.
+- Show footer status during automatic Git synchronization and reference materialization from input or autocomplete.
+- Keep status visible across overlapping operations and clear it safely when the session ends or changes.
+
 ## [0.4.0] - 2026-11-10
 
 - Apply `/references add` in the current session without reloading other extensions. Respect project trust and preserve unchanged Git checkout paths.
