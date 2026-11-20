@@ -15,6 +15,13 @@ function sanitizeDescription(description: string): string {
 
 const MAX_PROMPT_SECTION_CHARS = 12_000;
 const REFERENCE_SYSTEM_PROMPT_SECTION = "pi-references";
+const AUTOMATIC_STATUS_KEY = "pi-references-automatic";
+
+type ReferenceSession = {
+  ctx: ExtensionContext;
+  controller: AbortController;
+  pending: Set<symbol>;
+};
 
 function buildSystemPromptSection(references: ResolvedReference[]): string {
   const described = references.filter((reference) => reference.description && reference.resolvedPath);
@@ -40,14 +47,12 @@ function buildSystemPromptSection(references: ResolvedReference[]): string {
 
 export default function (pi: ExtensionAPI) {
   const currentReferences: ResolvedReference[] = [];
-  let sessionAbortController: AbortController | undefined;
-  let sessionGeneration = 0;
+  let session: ReferenceSession | undefined;
   const sessionSyncPromises = new Set<Promise<unknown>>();
   let autocompleteRegistered = false;
-  let sessionContext: ExtensionContext | undefined;
 
   function run<T>(operation: (signal: AbortSignal) => Promise<T>, signal?: AbortSignal): Promise<T> {
-    const sessionSignal = sessionAbortController?.signal ?? AbortSignal.abort();
+    const sessionSignal = session?.controller.signal ?? AbortSignal.abort();
     const combined = signal ? AbortSignal.any([sessionSignal, signal]) : sessionSignal;
     const promise = operation(combined);
     sessionSyncPromises.add(promise);
@@ -55,10 +60,33 @@ export default function (pi: ExtensionAPI) {
     return promise;
   }
 
+  async function runWithStatus<T>(
+    owner: ReferenceSession,
+    operation: (signal: AbortSignal) => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    const token = Symbol();
+    owner.pending.add(token);
+    try {
+      if (owner.pending.size === 1) owner.ctx.ui.setStatus?.(AUTOMATIC_STATUS_KEY, "Preparing Git references…");
+      return await run(operation, signal);
+    } finally {
+      owner.pending.delete(token);
+      if (session === owner && owner.pending.size === 0) owner.ctx.ui.setStatus?.(AUTOMATIC_STATUS_KEY, undefined);
+    }
+  }
+
+  function retireSession(): void {
+    const owner = session;
+    if (!owner) return;
+    session = undefined;
+    owner.controller.abort();
+    if (owner.pending.size > 0) owner.ctx.ui.setStatus?.(AUTOMATIC_STATUS_KEY, undefined);
+  }
+
   function loadContext(ctx: ExtensionContext): void {
-    const controller = sessionAbortController;
-    if (!controller || controller.signal.aborted) return;
-    const generation = sessionGeneration;
+    const owner = session;
+    if (!owner) return;
     const loaded = loadReferences(ctx.cwd, ctx.isProjectTrusted());
     const next = loaded.references.map((reference) => {
       const previous = currentReferences.find((item) => item.alias === reference.alias);
@@ -83,9 +111,10 @@ export default function (pi: ExtensionAPI) {
 
     // Clone and refresh all configured Git references in the background. Do not
     // await this promise: Pi should finish startup while Git works asynchronously.
-    const syncPromise = run((signal) => synchronizeAllGitReferences(pi, added, { signal }))
+    if (!added.some((reference) => reference.kind === "git")) return;
+    const syncPromise = runWithStatus(owner, (signal) => synchronizeAllGitReferences(pi, added, { signal }))
       .then((results) => {
-        if (generation !== sessionGeneration || controller.signal.aborted) {
+        if (session !== owner) {
           return;
         }
         const failures = results.filter((result) => result.action === "failed");
@@ -97,7 +126,7 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.notify(`Git references not synchronized: ${aliases}`, "warning");
       })
       .catch((error: unknown) => {
-        if (generation !== sessionGeneration || controller.signal.aborted) {
+        if (session !== owner) {
           return;
         }
         const message = error instanceof Error ? error.message : String(error);
@@ -107,65 +136,44 @@ export default function (pi: ExtensionAPI) {
   }
 
   async function ensureAvailable(reference: ResolvedReference, signal?: AbortSignal): Promise<void> {
-    if (reference.kind !== "git" || !currentReferences.includes(reference) || sessionAbortController?.signal.aborted) return;
-    const generation = sessionGeneration;
-    const warning = await run((combined) => materializeGitReference(pi, reference, { signal: combined }), signal);
-    if (warning && generation === sessionGeneration && !sessionAbortController?.signal.aborted && !signal?.aborted) {
-      sessionContext?.ui.notify(`pi-references: ${warning}`, "error");
+    const owner = session;
+    if (!owner || reference.kind !== "git" || !currentReferences.includes(reference) || signal?.aborted) return;
+    const warning = await runWithStatus(owner, (combined) => materializeGitReference(pi, reference, { signal: combined }), signal);
+    if (warning && session === owner && !signal?.aborted) {
+      owner.ctx.ui.notify(`pi-references: ${warning}`, "error");
     }
   }
 
   registerReferenceCommands(pi, currentReferences, { reload: loadContext, run });
 
   pi.on("session_start", (_event, ctx) => {
-    sessionAbortController?.abort();
-    sessionAbortController = new AbortController();
-    sessionGeneration++;
-    sessionContext = ctx;
+    retireSession();
+    session = { ctx, controller: new AbortController(), pending: new Set() };
     currentReferences.splice(0, currentReferences.length);
     loadContext(ctx);
   });
 
   pi.on("session_shutdown", async () => {
-    sessionAbortController?.abort();
-    sessionAbortController = undefined;
-    sessionContext = undefined;
-    sessionGeneration++;
-
-    // Do not let the next session reuse a cache directory while any previous
-    // Git operation is still cleaning up. Re-check in case a lifecycle event
-    // queued another sync before shutdown started.
-    while (sessionSyncPromises.size > 0) {
-      await Promise.allSettled([...sessionSyncPromises]);
-    }
-
+    retireSession();
     currentReferences.splice(0, currentReferences.length);
     autocompleteRegistered = false;
+    await Promise.allSettled([...sessionSyncPromises]);
   });
 
-  pi.on("input", async (event, ctx) => {
-    if (currentReferences.length === 0) {
+  pi.on("input", async (event) => {
+    const owner = session;
+    if (!owner || currentReferences.length === 0) {
       return { action: "continue" as const };
     }
 
-    const inputGeneration = sessionGeneration;
-    const inputSignal = sessionAbortController?.signal;
     const byAlias = new Map(currentReferences.map((reference) => [reference.alias, reference]));
     const referencesToMaterialize = getReferencedAliases(event.text)
       .map((alias) => byAlias.get(alias))
       .filter((reference): reference is ResolvedReference => Boolean(reference && reference.kind === "git"));
 
-    const results = await Promise.all(referencesToMaterialize.map(async (reference) => ({
-      reference,
-      warning: await run((signal) => materializeGitReference(pi, reference, { signal }), inputSignal),
-    })));
-    for (const { warning } of results) {
-      if (warning && inputGeneration === sessionGeneration && !inputSignal?.aborted) {
-        ctx.ui.notify(`pi-references: ${warning}`, "error");
-      }
-    }
+    await Promise.all(referencesToMaterialize.map((reference) => ensureAvailable(reference)));
 
-    if (inputGeneration !== sessionGeneration || inputSignal?.aborted) {
+    if (session !== owner) {
       return { action: "continue" as const };
     }
 

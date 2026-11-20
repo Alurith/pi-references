@@ -375,7 +375,7 @@ describe("extension integration", () => {
         notify() {},
       },
     });
-    assert.deepEqual(statuses, [
+    assert.deepEqual(statuses.filter(([key]) => key === "pi-references"), [
       ["pi-references", "Syncing sdk…"],
       ["pi-references", undefined],
     ]);
@@ -479,16 +479,22 @@ describe("extension integration", () => {
     const sessionShutdown = handlers.get("session_shutdown");
     assert.ok(sessionStart);
     assert.ok(sessionShutdown);
+    const statuses: Array<string | undefined> = [];
     const sessionContext = (cwd: string) => ({
       cwd,
       isProjectTrusted: () => true,
-      ui: { addAutocompleteProvider() {}, notify() {} },
+      ui: {
+        addAutocompleteProvider() {},
+        notify() {},
+        setStatus(_key: string, text: string | undefined) { statuses.push(text); },
+      },
     });
 
     sessionStart({ type: "session_start", reason: "startup" }, sessionContext(firstRoot));
     await firstStarted;
     sessionStart({ type: "session_start", reason: "new" }, sessionContext(secondRoot));
     await secondStarted;
+    assert.deepEqual(statuses, ["Preparing Git references…", undefined, "Preparing Git references…"]);
 
     let shutdownFinished = false;
     const shutdownPromise = sessionShutdown({}, {}) as Promise<void>;
@@ -502,6 +508,7 @@ describe("extension integration", () => {
     releaseFirst();
     await shutdownPromise;
     assert.equal(shutdownFinished, true);
+    assert.deepEqual(statuses, ["Preparing Git references…", undefined, "Preparing Git references…", undefined]);
   });
 });
 
@@ -512,6 +519,7 @@ describe("live reference lifecycle", () => {
     let provider: any;
     let registrations = 0;
     const messages: string[] = [];
+    const statuses: Array<string | undefined> = [];
     extension({
       exec,
       on(event: string, handler: any) { handlers.set(event, handler); },
@@ -521,6 +529,9 @@ describe("live reference lifecycle", () => {
       cwd, signal: new AbortController().signal, isProjectTrusted: () => trusted,
       ui: {
         notify(message: string) { messages.push(message); },
+        setStatus(key: string, text: string | undefined) {
+          if (key === "pi-references-automatic") statuses.push(text);
+        },
         addAutocompleteProvider(factory: any) {
           registrations++;
           provider = factory({ getSuggestions: async () => null, applyCompletion() {} });
@@ -528,7 +539,7 @@ describe("live reference lifecycle", () => {
       },
     });
     return {
-      handlers, messages, context,
+      handlers, messages, statuses, context,
       command: (args: string, ctx: any) => command.handler(args, ctx),
       completions: (prefix: string) => command.getArgumentCompletions(prefix),
       suggest: (text: string) => provider.getSuggestions([text], 0, text.length, { signal: new AbortController().signal }),
@@ -618,6 +629,7 @@ describe("live reference lifecycle", () => {
     const input = await f.handlers.get("input")!({ text: "@sdk/source.ts" }, ctx);
     assert.equal(input.action, "transform");
     assert.match(input.text, /source.ts \[resolved:/);
+    assert.deepEqual(f.statuses, ["Preparing Git references…", undefined]);
     assert.ok((await f.suggest("@sdk/")).items.some((item: any) => item.value === "@sdk/source.ts"));
     const path = (await f.suggest("@sdk")).items[0].description;
     assert.match(path, /cache.*references/);
@@ -651,14 +663,17 @@ describe("live reference lifecycle", () => {
       const operation = source === "input" ? f.handlers.get("input")!({ text: "@sdk" }, ctx)
         : source === "autocomplete" ? f.suggest("@sdk/") : f.command("sync sdk", ctx);
       await started;
+      if (source !== "sync") assert.deepEqual(f.statuses, ["Preparing Git references…"]);
       let finished = false;
       const shutdown = f.handlers.get("session_shutdown")!({}, ctx).then(() => { finished = true; });
+      assert.deepEqual(f.statuses, ["Preparing Git references…", undefined]);
       assert.equal(activeSignal?.aborted, true);
       await new Promise<void>((resolve) => setImmediate(resolve));
       assert.equal(finished, false);
       release();
       await Promise.all([operation, shutdown]);
       assert.equal(finished, true);
+      assert.deepEqual(f.statuses, ["Preparing Git references…", undefined]);
     });
   }
 
