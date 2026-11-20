@@ -30,7 +30,7 @@ The goal is to bring the behavior described in OpenCode's references documentati
 
 ## Compatibility
 
-- Pi **>=1.5.0 <2.0.0**; verified with **1.5.2**
+- Pi **>=1.5.0 <2.0.0**; verified with **1.6.0**
 - Node.js **>=22.19.0**, as required by Pi
 
 The extension uses Pi's exported `CONFIG_DIR_NAME` and `getAgentDir()`. The
